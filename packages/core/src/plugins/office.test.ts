@@ -10,6 +10,8 @@ const shouldHangDocxPreview = vi.hoisted(() => ({ value: false }));
 const shouldFailMammoth = vi.hoisted(() => ({ value: false }));
 const shouldHangMammoth = vi.hoisted(() => ({ value: false }));
 const shouldRenderBlankDocxPreview = vi.hoisted(() => ({ value: false }));
+const docxPreviewImageSrc = vi.hoisted(() => ({ value: "" }));
+const shouldRenderVerticalDocxTable = vi.hoisted(() => ({ value: false }));
 const renderDocxAsync = vi.hoisted(() =>
   vi.fn(async (_data: unknown, bodyContainer: HTMLElement, _styleContainer?: HTMLElement, _options?: unknown) => {
     if (shouldHangDocxPreview.value) {
@@ -47,6 +49,22 @@ const renderDocxAsync = vi.hoisted(() =>
     normalParagraph.style.lineHeight = "1.5";
     normalParagraph.textContent = "DOCX layout page";
     page.append(compactParagraph, percentParagraph, normalParagraph);
+    if (docxPreviewImageSrc.value) {
+      const image = document.createElement("img");
+      image.src = docxPreviewImageSrc.value;
+      page.append(image);
+    }
+    if (shouldRenderVerticalDocxTable.value) {
+      const table = document.createElement("table");
+      const row = table.insertRow();
+      const cell = row.insertCell();
+      cell.style.writingMode = "vertical-rl";
+      const paragraph = document.createElement("p");
+      paragraph.style.writingMode = "vertical-rl";
+      paragraph.textContent = "采购字段名";
+      cell.append(paragraph);
+      page.append(table);
+    }
     wrapper.append(page);
     bodyContainer.append(wrapper);
   })
@@ -219,6 +237,8 @@ describe("officePlugin", () => {
     shouldFailMammoth.value = false;
     shouldHangMammoth.value = false;
     shouldRenderBlankDocxPreview.value = false;
+    docxPreviewImageSrc.value = "";
+    shouldRenderVerticalDocxTable.value = false;
     pptxRenderMode.value = "normal";
     delete (globalThis as { __OFV_DOCX_RENDER_TIMEOUT_MS__?: number }).__OFV_DOCX_RENDER_TIMEOUT_MS__;
     delete (globalThis as { __OFV_PPTX_RENDER_TIMEOUT_MS__?: number }).__OFV_PPTX_RENDER_TIMEOUT_MS__;
@@ -894,6 +914,62 @@ describe("officePlugin", () => {
       renderFooters: true
     });
     expect(container.querySelector(".ofv-docx-document")?.textContent).toContain("DOCX layout page");
+  });
+
+  it("prefers an embedded SVG alternative over its lossy DOCX fallback image", async () => {
+    const container = document.createElement("div");
+    const fixture = await createDocxWithSvgImageAlternative();
+    docxPreviewImageSrc.value = fixture.fallbackDataUrl;
+    document.body.append(container);
+
+    createViewer({
+      container,
+      file: fixture.file,
+      fileName: "flowchart.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelector("img")?.dataset.ofvDocxSvgAlternative === "true");
+
+    const image = container.querySelector<HTMLImageElement>(".ofv-docx-document img");
+    expect(image?.src).toBe(fixture.svgDataUrl);
+    expect(image?.src).toContain("data:image/svg+xml;base64,");
+  });
+
+  it("repairs unexpected vertical table text when the DOCX does not declare it", async () => {
+    const container = document.createElement("div");
+    shouldRenderVerticalDocxTable.value = true;
+    document.body.append(container);
+
+    createViewer({
+      container,
+      file: await createDocxWithTableTextDirection(false),
+      fileName: "horizontal-table.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelector<HTMLTableCellElement>(".ofv-docx-document td")?.style.writingMode === "horizontal-tb");
+
+    expect(container.querySelector<HTMLTableCellElement>(".ofv-docx-document td")?.style.writingMode).toBe("horizontal-tb");
+    expect(container.querySelector<HTMLParagraphElement>(".ofv-docx-document td p")?.style.writingMode).toBe("horizontal-tb");
+  });
+
+  it("preserves table text direction when the DOCX explicitly declares vertical text", async () => {
+    const container = document.createElement("div");
+    shouldRenderVerticalDocxTable.value = true;
+    document.body.append(container);
+
+    createViewer({
+      container,
+      file: await createDocxWithTableTextDirection(true),
+      fileName: "vertical-table.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-docx-document td")));
+
+    expect(container.querySelector<HTMLTableCellElement>(".ofv-docx-document td")?.style.writingMode).toBe("vertical-rl");
+    expect(container.querySelector<HTMLParagraphElement>(".ofv-docx-document td p")?.style.writingMode).toBe("vertical-rl");
   });
 
   it("sniffs OOXML Word packages even when they use a legacy .doc extension", async () => {
@@ -2662,6 +2738,67 @@ async function createMinimalDocx(text: string, footerText?: string): Promise<Blo
           <w:p><w:r><w:t>${footerText}</w:t></w:r></w:p></w:ftr>`
     );
   }
+  return zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
+async function createDocxWithSvgImageAlternative(): Promise<{
+  file: Blob;
+  fallbackDataUrl: string;
+  svgDataUrl: string;
+}> {
+  const zip = new JSZip();
+  const fallbackImage = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const svgImage = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+    <rect width="200" height="100" fill="white"/>
+    <text x="20" y="55">发起采购流程</text>
+  </svg>`;
+  zip.file(
+    "word/document.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main">
+        <w:body><w:p><w:r><w:drawing><a:blip r:embed="rIdPng">
+          <a:extLst><a:ext><asvg:svgBlip r:embed="rIdSvg"/></a:ext></a:extLst>
+        </a:blip></w:drawing></w:r></w:p></w:body>
+      </w:document>`
+  );
+  zip.file(
+    "word/_rels/document.xml.rels",
+    `<?xml version="1.0" encoding="UTF-8"?>
+      <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rIdPng" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+        <Relationship Id="rIdSvg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.svg"/>
+      </Relationships>`
+  );
+  zip.file("word/media/image1.png", fallbackImage);
+  zip.file("word/media/image2.svg", svgImage);
+  return {
+    file: await zip.generateAsync({
+      type: "blob",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    }),
+    fallbackDataUrl: `data:application/octet-stream;base64,${Buffer.from(fallbackImage).toString("base64")}`,
+    svgDataUrl: `data:image/svg+xml;base64,${Buffer.from(svgImage).toString("base64")}`
+  };
+}
+
+async function createDocxWithTableTextDirection(vertical: boolean): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    "word/document.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body><w:tbl><w:tr><w:tc>
+          <w:tcPr>${vertical ? '<w:textDirection w:val="tbRl"/>' : ""}</w:tcPr>
+          <w:p><w:r><w:t>采购字段名</w:t></w:r></w:p>
+        </w:tc></w:tr></w:tbl></w:body>
+      </w:document>`
+  );
   return zip.generateAsync({
     type: "blob",
     mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

@@ -1412,9 +1412,15 @@ function looksLikeDocxTextboxHeading(value: string): boolean {
 }
 
 async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuffer, styleContainer?: HTMLElement): Promise<void> {
-  const [hints, charts] = await Promise.all([readDocxLayoutHints(arrayBuffer), readDocxCharts(arrayBuffer)]);
+  const [hints, charts, svgImageAlternatives] = await Promise.all([
+    readDocxLayoutHints(arrayBuffer),
+    readDocxCharts(arrayBuffer),
+    readDocxSvgImageAlternatives(arrayBuffer)
+  ]);
   normalizeDocxEastAsiaFontStyles(styleContainer, hints.eastAsiaFonts);
   normalizeDocxNumberingStyles(styleContainer);
+  repairDocxSvgImageAlternatives(container, svgImageAlternatives);
+  repairUnexpectedDocxTableTextDirections(container, hints.hasVerticalTextDirection);
   repairDocxChartPlaceholders(container, charts);
   repairDocxComplexScriptFontSizes(container, hints.complexScriptFontSizeParagraphs);
   const pages = container.querySelectorAll<HTMLElement>("section.ofv-docx");
@@ -1665,6 +1671,7 @@ type DocxLayoutHints = {
     text: string;
     fontSizePt: number;
   }>;
+  hasVerticalTextDirection: boolean;
 };
 
 async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayoutHints> {
@@ -1685,15 +1692,100 @@ async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayout
       floatingPictures: documentXml ? extractFloatingPictureHints(documentXml) : [],
       rightTabParagraphs: documentXml ? extractDocxRightTabParagraphHints(documentXml) : [],
       pageNumberFieldResults: footerXmls.flatMap(extractDocxPageNumberFieldResults),
-      complexScriptFontSizeParagraphs: documentXml ? extractDocxComplexScriptFontSizeHints(documentXml) : []
+      complexScriptFontSizeParagraphs: documentXml ? extractDocxComplexScriptFontSizeHints(documentXml) : [],
+      hasVerticalTextDirection: Boolean(documentXml && /<w:textDirection\b/.test(documentXml))
     };
   } catch {
     return {
       floatingPictures: [],
       rightTabParagraphs: [],
       pageNumberFieldResults: [],
-      complexScriptFontSizeParagraphs: []
+      complexScriptFontSizeParagraphs: [],
+      hasVerticalTextDirection: false
     };
+  }
+}
+
+type DocxSvgImageAlternative = {
+  fallbackDataUrls: string[];
+  svgDataUrl: string;
+};
+
+async function readDocxSvgImageAlternatives(arrayBuffer: ArrayBuffer): Promise<DocxSvgImageAlternative[]> {
+  try {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const documentXml = await zip.file("word/document.xml")?.async("text");
+    const documentDoc = documentXml ? parseOfficeXml(documentXml) : undefined;
+    if (!documentDoc) {
+      return [];
+    }
+    const relationships = await readOfficeRelationships(zip, "word/document.xml");
+    const relationshipsById = new Map(relationships.map((relationship) => [relationship.id, relationship]));
+    const alternatives: DocxSvgImageAlternative[] = [];
+
+    for (const blip of Array.from(documentDoc.getElementsByTagName("*"))) {
+      if (blip.localName !== "blip") {
+        continue;
+      }
+      const svgBlip = Array.from(blip.getElementsByTagName("*")).find((element) => element.localName === "svgBlip");
+      const fallbackRelationship = relationshipsById.get(getXmlAttribute(blip, "embed") || "");
+      const svgRelationship = relationshipsById.get(svgBlip ? getXmlAttribute(svgBlip, "embed") || "" : "");
+      const fallbackPath = resolveOfficeRelationshipTarget("word/document.xml", fallbackRelationship?.target);
+      const svgPath = resolveOfficeRelationshipTarget("word/document.xml", svgRelationship?.target);
+      if (!fallbackPath || !svgPath || mimeTypeFromPath(svgPath) !== "image/svg+xml") {
+        continue;
+      }
+      const fallbackFile = zip.file(fallbackPath);
+      const svgFile = zip.file(svgPath);
+      if (!fallbackFile || !svgFile) {
+        continue;
+      }
+      const [fallbackBase64, svgBase64] = await Promise.all([fallbackFile.async("base64"), svgFile.async("base64")]);
+      const fallbackMimeType = mimeTypeFromPath(fallbackPath);
+      alternatives.push({
+        fallbackDataUrls: [
+          `data:application/octet-stream;base64,${fallbackBase64}`,
+          `data:${fallbackMimeType};base64,${fallbackBase64}`
+        ],
+        svgDataUrl: `data:image/svg+xml;base64,${svgBase64}`
+      });
+    }
+    return alternatives;
+  } catch {
+    return [];
+  }
+}
+
+function repairDocxSvgImageAlternatives(container: HTMLElement, alternatives: DocxSvgImageAlternative[]): void {
+  if (alternatives.length === 0) {
+    return;
+  }
+  const alternativesByFallback = new Map<string, string[]>();
+  for (const alternative of alternatives) {
+    for (const fallbackDataUrl of alternative.fallbackDataUrls) {
+      const svgDataUrls = alternativesByFallback.get(fallbackDataUrl) || [];
+      svgDataUrls.push(alternative.svgDataUrl);
+      alternativesByFallback.set(fallbackDataUrl, svgDataUrls);
+    }
+  }
+  for (const image of container.querySelectorAll<HTMLImageElement>("img")) {
+    const svgDataUrl = alternativesByFallback.get(image.getAttribute("src") || "")?.shift();
+    if (svgDataUrl) {
+      image.src = svgDataUrl;
+      image.dataset.ofvDocxSvgAlternative = "true";
+    }
+  }
+}
+
+function repairUnexpectedDocxTableTextDirections(container: HTMLElement, hasVerticalTextDirection: boolean): void {
+  if (hasVerticalTextDirection) {
+    return;
+  }
+  for (const element of container.querySelectorAll<HTMLElement>("table, thead, tbody, tfoot, tr, th, td, table p, table span")) {
+    if (getComputedStyle(element).writingMode !== "horizontal-tb") {
+      element.style.writingMode = "horizontal-tb";
+      element.style.textOrientation = "mixed";
+    }
   }
 }
 
