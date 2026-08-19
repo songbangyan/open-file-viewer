@@ -58,6 +58,7 @@ describe("core responsive styles", () => {
     expect(rule(".ofv-word-html-document p")).toContain("margin: 0");
     expect(docxWrapper).toContain("width: 100%");
     expect(docxWrapper).toContain("max-width: 100%");
+    expect(docxWrapper).toContain("margin-inline: auto");
     expect(docxWrapper).toContain("overflow: hidden");
     expect(docxWrapper).toContain("background: transparent");
     expect(docxWrapper).toContain("--ofv-docx-scale: 1");
@@ -82,6 +83,11 @@ describe("core responsive styles", () => {
     expect(docxSection).toContain("overflow-wrap: normal");
     expect(docxSection).toContain("transform: scale(calc(var(--ofv-docx-scale) * var(--ofv-office-zoom, 1)))");
     expect(docxSection).toContain("transform-origin: top left");
+    expect(rule(".ofv-docx-right-tab-line")).toContain("width: var(--ofv-docx-right-tab-position)");
+    expect(rule(".ofv-docx-right-tab-end")).toContain("margin-inline-start: auto");
+    expect(rule(".ofv-docx-right-tab-source")).toContain("display: none !important");
+    expect(rule(".ofv-docx-page-bottom-frame")).toContain("position: absolute");
+    expect(rule(".ofv-docx-page-bottom-frame")).toContain("line-height: 1.2");
     expect(rule(".ofv-docx-textbox-page-flow-main .ofv-docx-textbox-block h3::before")).toContain(
       "clip-path: polygon(0 0, 45% 0, 100% 50%, 45% 100%, 0 100%, 55% 50%)"
     );

@@ -972,6 +972,169 @@ describe("officePlugin", () => {
     expect(paragraphs[2]?.style.lineHeight).toBe("1.5");
   });
 
+  it("uses the DOCX complex-script size when no regular font size is present", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      for (const text of ["仅复杂脚本字号", "普通字号优先"]) {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = text;
+        page.append(paragraph);
+      }
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+    });
+    const zip = new JSZip();
+    zip.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:pPr><w:rPr><w:szCs w:val="21"/></w:rPr></w:pPr>
+          <w:r><w:rPr><w:szCs w:val="21"/></w:rPr><w:t>仅复杂脚本字号</w:t></w:r>
+        </w:p>
+        <w:p><w:pPr><w:rPr><w:sz w:val="20"/><w:szCs w:val="21"/></w:rPr></w:pPr>
+          <w:r><w:rPr><w:sz w:val="20"/><w:szCs w:val="21"/></w:rPr><w:t>普通字号优先</w:t></w:r>
+        </w:p>
+      </w:body></w:document>`
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
+      fileName: "complex-script-size.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("section.ofv-docx p").length === 2);
+
+    const paragraphs = Array.from(container.querySelectorAll<HTMLParagraphElement>("section.ofv-docx p"));
+    expect(paragraphs[0]?.style.fontSize).toBe("10pt");
+    expect(paragraphs[1]?.style.fontSize).toBe("");
+  });
+
+  it("aligns right-tab DOCX text to the OOXML tab position", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      const paragraph = document.createElement("p");
+      const start = document.createElement("span");
+      start.textContent = "青岛市刘致远街道";
+      const tabRun = document.createElement("span");
+      const tabStop = document.createElement("span");
+      tabStop.className = "ofv-docx-tab-stop";
+      tabStop.textContent = "\u00a0";
+      tabRun.append(tabStop);
+      const end = document.createElement("span");
+      end.textContent = "2026年06月19日印发";
+      paragraph.append(start, tabRun, end);
+      page.append(paragraph);
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+    });
+    const zip = new JSZip();
+    zip.file(
+      "word/document.xml",
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body><w:p><w:pPr><w:framePr w:yAlign="bottom"/><w:tabs><w:tab w:val="right" w:pos="8500"/></w:tabs></w:pPr>
+            <w:r><w:t>青岛市刘致远街道</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>2026年06月19日印发</w:t></w:r>
+          </w:p></w:body>
+        </w:document>`
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
+      fileName: "right-tab.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-docx-right-tab-line")));
+
+    const line = container.querySelector<HTMLElement>(".ofv-docx-right-tab-line");
+    expect(line?.style.getPropertyValue("--ofv-docx-right-tab-position")).toBe("425pt");
+    expect(line?.querySelector(".ofv-docx-right-tab-start")?.textContent).toBe("青岛市刘致远街道");
+    expect(line?.querySelector(".ofv-docx-right-tab-end")?.textContent).toBe("2026年06月19日印发");
+    expect(container.querySelector(".ofv-docx-right-tab-source .ofv-docx-tab-stop")).not.toBeNull();
+    expect(line?.closest(".ofv-docx-page-bottom-frame")?.parentElement?.classList.contains("ofv-docx")).toBe(true);
+  });
+
+  it("keeps a bottom-anchored right-tab frame on the final DOCX page", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.style.width = "600px";
+      page.style.minHeight = "200px";
+      page.style.padding = "20px";
+      const article = document.createElement("article");
+      const body = document.createElement("p");
+      body.textContent = "Body content";
+      const frame = document.createElement("p");
+      const start = document.createElement("span");
+      start.textContent = "Left";
+      const tabRun = document.createElement("span");
+      const tabStop = document.createElement("span");
+      tabStop.className = "ofv-docx-tab-stop";
+      tabStop.textContent = "\u00a0";
+      tabRun.append(tabStop);
+      const end = document.createElement("span");
+      end.textContent = "Right";
+      frame.append(start, tabRun, end);
+      article.append(body, frame);
+      page.append(article);
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const bottom = this.classList.contains("ofv-docx-page-bottom-frame") ? 220 : this.tagName === "P" ? 100 : 0;
+      return { x: 0, y: 0, top: 0, right: 600, bottom, left: 0, width: 600, height: bottom, toJSON: () => ({}) };
+    });
+    const zip = new JSZip();
+    zip.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:r><w:t>Body content</w:t></w:r></w:p>
+        <w:p><w:pPr><w:framePr w:yAlign="bottom"/><w:tabs><w:tab w:val="right" w:pos="3000"/></w:tabs></w:pPr>
+          <w:r><w:t>Left</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>Right</w:t></w:r>
+        </w:p>
+      </w:body></w:document>`
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
+      fileName: "bottom-frame.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-docx-page-bottom-frame")));
+
+    const pages = container.querySelectorAll("section.ofv-docx");
+    const frame = container.querySelector<HTMLElement>(".ofv-docx-page-bottom-frame");
+    expect(pages).toHaveLength(1);
+    expect(frame?.parentElement).toBe(pages[0]);
+    expect(frame?.style.left).toBe("20px");
+    expect(frame?.style.right).toBe("20px");
+    expect(frame?.style.bottom).toBe("20px");
+  });
+
   it("normalizes DOCX atLeast line heights against the largest child font", async () => {
     renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
       const wrapper = document.createElement("div");
@@ -1094,7 +1257,7 @@ describe("officePlugin", () => {
       header.textContent = "Repeated header";
       const article = document.createElement("article");
 
-      for (let index = 1; index <= 4; index += 1) {
+      for (let index = 1; index <= 5; index += 1) {
         const paragraph = document.createElement("div");
         paragraph.textContent = `Overflow paragraph ${index}`;
         paragraph.getBoundingClientRect = () => {
@@ -1105,26 +1268,52 @@ describe("officePlugin", () => {
         article.append(paragraph);
       }
 
-      page.append(header, article);
+      const footer = document.createElement("footer");
+      const footerParagraph = document.createElement("p");
+      for (const text of ["-", "2", "-"]) {
+        const span = document.createElement("span");
+        span.textContent = text;
+        footerParagraph.append(span);
+      }
+      footer.append(footerParagraph);
+      page.append(header, article, footer);
       wrapper.append(page);
       bodyContainer.append(wrapper);
     });
 
+    const zip = new JSZip();
+    zip.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`
+    );
+    zip.file(
+      "word/footer1.xml",
+      `<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p>
+        <w:r><w:t>-</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>
+        <w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        <w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>-</w:t></w:r>
+      </w:p></w:ftr>`
+    );
     const container = document.createElement("div");
     document.body.append(container);
     createViewer({
       container,
-      file: new Blob(["docx"], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+      file: await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
       fileName: "overflowing-flow.docx",
       plugins: [officePlugin()]
     });
 
-    await waitFor(() => container.querySelectorAll("section.ofv-docx").length === 2);
+    await waitFor(() => container.querySelectorAll("section.ofv-docx").length === 3);
     const pages = Array.from(container.querySelectorAll<HTMLElement>("section.ofv-docx"));
     expect(pages[0]?.querySelector("article")?.textContent).toBe("Overflow paragraph 1Overflow paragraph 2");
     expect(pages[1]?.querySelector("article")?.textContent).toBe("Overflow paragraph 3Overflow paragraph 4");
+    expect(pages[2]?.querySelector("article")?.textContent).toBe("Overflow paragraph 5");
     expect(pages[1]?.querySelector("header")?.textContent).toBe("Repeated header");
     expect(pages[1]?.dataset.ofvDocxFlowContinuation).toBe("true");
+    expect(pages.map((page) => page.querySelector("footer")?.textContent)).toEqual(["-2-", "-3-", "-4-"]);
   });
 
   it("splits an overflowing DOCX paragraph across pages without losing rich text", async () => {
@@ -1383,6 +1572,47 @@ describe("officePlugin", () => {
 
     zoomReset?.click();
     expect(panel?.style.getPropertyValue("--ofv-office-zoom")).toBe("1");
+  });
+
+  it("keeps contain-fit DOCX scaling stable when zooming out a single page", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    const viewer = createViewer({
+      container,
+      file: new Blob(["docx"], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
+      fileName: "single-page.docx",
+      width: "940px",
+      height: "620px",
+      fit: "contain",
+      toolbar: true,
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-docx-document")));
+    const viewport = container.querySelector<HTMLElement>(".ofv-viewport");
+    const panel = container.querySelector<HTMLElement>(".ofv-office");
+    const docxDocument = container.querySelector<HTMLElement>(".ofv-docx-document");
+    const wrapper = container.querySelector<HTMLElement>(".ofv-docx-wrapper");
+    Object.defineProperty(viewport, "clientHeight", { configurable: true, value: 571 });
+    Object.defineProperty(docxDocument, "clientWidth", { configurable: true, value: 906 });
+    Object.defineProperty(docxDocument, "clientHeight", { configurable: true, value: 1185 });
+    panel!.style.padding = "16px";
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(wrapper?.style.getPropertyValue("--ofv-docx-scale")).toBe("0.4372");
+
+    Object.defineProperty(docxDocument, "clientHeight", { configurable: true, value: 306 });
+    container.querySelector<HTMLButtonElement>('button[aria-label="Zoom out"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(panel?.style.getPropertyValue("--ofv-office-zoom")).toBe("0.88");
+    expect(wrapper?.style.getPropertyValue("--ofv-docx-scale")).toBe("0.4372");
+
+    viewer.destroy();
   });
 
   it("keeps the DOCX layout preview without rendering supplemental footer code", async () => {

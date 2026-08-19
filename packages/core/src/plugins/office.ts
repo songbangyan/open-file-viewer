@@ -1416,6 +1416,7 @@ async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuf
   normalizeDocxEastAsiaFontStyles(styleContainer, hints.eastAsiaFonts);
   normalizeDocxNumberingStyles(styleContainer);
   repairDocxChartPlaceholders(container, charts);
+  repairDocxComplexScriptFontSizes(container, hints.complexScriptFontSizeParagraphs);
   const pages = container.querySelectorAll<HTMLElement>("section.ofv-docx");
   for (const page of pages) {
     repairDocxShapeFills(page);
@@ -1435,6 +1436,8 @@ async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuf
       }
     }
   }
+  repairDocxRightTabStops(container, hints.rightTabParagraphs);
+  markDocxPageNumberFields(container, hints.pageNumberFieldResults);
 }
 
 function normalizeDocxNumberingStyles(styleContainer: HTMLElement | undefined): void {
@@ -1652,24 +1655,253 @@ type DocxLayoutHints = {
     relativeToParagraph: boolean;
     wrap: string;
   }>;
+  rightTabParagraphs: Array<{
+    text: string;
+    positionPt: number;
+    pageBottomFrame: boolean;
+  }>;
+  pageNumberFieldResults: string[];
+  complexScriptFontSizeParagraphs: Array<{
+    text: string;
+    fontSizePt: number;
+  }>;
 };
 
 async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayoutHints> {
   try {
     const zip = await JSZip.loadAsync(arrayBuffer);
     const themeEntry = Object.values(zip.files).find((entry) => !entry.dir && /^word\/theme\/theme\d+\.xml$/i.test(entry.name));
-    const [documentXml, stylesXml, themeXml] = await Promise.all([
+    const footerEntries = Object.values(zip.files).filter(
+      (entry) => !entry.dir && /^word\/footer\d+\.xml$/i.test(entry.name)
+    );
+    const [documentXml, stylesXml, themeXml, footerXmls] = await Promise.all([
       zip.file("word/document.xml")?.async("text"),
       zip.file("word/styles.xml")?.async("text"),
-      themeEntry?.async("text")
+      themeEntry?.async("text"),
+      Promise.all(footerEntries.map((entry) => entry.async("text")))
     ]);
     return {
       eastAsiaFonts: extractDocxEastAsiaFonts(stylesXml || "", themeXml || ""),
-      floatingPictures: documentXml ? extractFloatingPictureHints(documentXml) : []
+      floatingPictures: documentXml ? extractFloatingPictureHints(documentXml) : [],
+      rightTabParagraphs: documentXml ? extractDocxRightTabParagraphHints(documentXml) : [],
+      pageNumberFieldResults: footerXmls.flatMap(extractDocxPageNumberFieldResults),
+      complexScriptFontSizeParagraphs: documentXml ? extractDocxComplexScriptFontSizeHints(documentXml) : []
     };
   } catch {
-    return { floatingPictures: [] };
+    return {
+      floatingPictures: [],
+      rightTabParagraphs: [],
+      pageNumberFieldResults: [],
+      complexScriptFontSizeParagraphs: []
+    };
   }
+}
+
+function extractDocxComplexScriptFontSizeHints(xml: string): DocxLayoutHints["complexScriptFontSizeParagraphs"] {
+  const document = parseOfficeXml(xml);
+  if (!document) {
+    return [];
+  }
+  return Array.from(document.getElementsByTagName("*"))
+    .filter((element) => element.localName === "p")
+    .map((paragraph) => {
+      const descendants = Array.from(paragraph.getElementsByTagName("*"));
+      if (descendants.some((element) => element.localName === "sz")) {
+        return undefined;
+      }
+      const halfPointSizes = descendants
+        .filter((element) => element.localName === "szCs")
+        .map((element) => Number(getXmlAttribute(element, "val")))
+        .filter((value) => Number.isFinite(value) && value > 0);
+      const uniqueSizes = [...new Set(halfPointSizes)];
+      const text = normalizePreviewText(
+        descendants
+          .filter((element) => element.localName === "t")
+          .map((element) => element.textContent || "")
+          .join("")
+      );
+      // Word/WPS falls back to a whole-point East Asian size here; browsers otherwise inherit docx-preview's 12pt default.
+      return text && uniqueSizes.length === 1
+        ? { text, fontSizePt: Math.max(1, Math.floor(uniqueSizes[0]! / 2)) }
+        : undefined;
+    })
+    .filter((hint): hint is DocxLayoutHints["complexScriptFontSizeParagraphs"][number] => Boolean(hint));
+}
+
+function repairDocxComplexScriptFontSizes(
+  container: HTMLElement,
+  hints: DocxLayoutHints["complexScriptFontSizeParagraphs"]
+): void {
+  if (hints.length === 0) {
+    return;
+  }
+  const candidatesByText = new Map<string, HTMLParagraphElement[]>();
+  for (const paragraph of container.querySelectorAll<HTMLParagraphElement>("section.ofv-docx p")) {
+    const text = normalizePreviewText(paragraph.textContent || "");
+    const candidates = candidatesByText.get(text) || [];
+    candidates.push(paragraph);
+    candidatesByText.set(text, candidates);
+  }
+  for (const hint of hints) {
+    const paragraph = candidatesByText.get(hint.text)?.shift();
+    if (paragraph) {
+      paragraph.style.fontSize = `${formatCssNumber(hint.fontSizePt)}pt`;
+    }
+  }
+}
+
+function extractDocxPageNumberFieldResults(xml: string): string[] {
+  const document = parseOfficeXml(xml);
+  if (!document) {
+    return [];
+  }
+  const results: string[] = [];
+  let inField = false;
+  let isPageField = false;
+  let afterSeparator = false;
+  let result = "";
+  for (const element of Array.from(document.getElementsByTagName("*"))) {
+    if (element.localName === "fldChar") {
+      const type = getXmlAttribute(element, "fldCharType");
+      if (type === "begin") {
+        inField = true;
+        isPageField = false;
+        afterSeparator = false;
+        result = "";
+      } else if (inField && type === "separate") {
+        afterSeparator = true;
+      } else if (inField && type === "end") {
+        if (isPageField && afterSeparator && result.trim()) {
+          results.push(result.trim());
+        }
+        inField = false;
+      }
+      continue;
+    }
+    if (inField && element.localName === "instrText" && /\bPAGE\b/i.test(element.textContent || "")) {
+      isPageField = true;
+    } else if (inField && isPageField && afterSeparator && element.localName === "t") {
+      result += element.textContent || "";
+    }
+  }
+  return results;
+}
+
+function markDocxPageNumberFields(container: HTMLElement, fieldResults: string[]): void {
+  if (fieldResults.length === 0) {
+    return;
+  }
+  const expectedResults = new Set(fieldResults.map((value) => normalizePreviewText(value)));
+  for (const footer of container.querySelectorAll<HTMLElement>("section.ofv-docx footer")) {
+    const candidates = Array.from(footer.querySelectorAll<HTMLElement>("span")).filter(
+      (span) => span.children.length === 0 && expectedResults.has(normalizePreviewText(span.textContent || ""))
+    );
+    if (candidates.length === 1) {
+      candidates[0]?.classList.add("ofv-docx-page-number-field");
+    }
+  }
+}
+
+function extractDocxRightTabParagraphHints(xml: string): DocxLayoutHints["rightTabParagraphs"] {
+  const document = parseOfficeXml(xml);
+  if (!document) {
+    return [];
+  }
+  return Array.from(document.getElementsByTagName("*"))
+    .filter((element) => element.localName === "p")
+    .map((paragraph) => {
+      const properties = Array.from(paragraph.children).find((child) => child.localName === "pPr");
+      const configuredTabs = properties
+        ? Array.from(properties.getElementsByTagName("*")).filter((child) => child.localName === "tab")
+        : [];
+      const contentTabs = Array.from(paragraph.getElementsByTagName("*")).filter(
+        (child) => child.localName === "tab" && !properties?.contains(child)
+      );
+      const tab = configuredTabs.length === 1 && contentTabs.length === 1 ? configuredTabs[0] : undefined;
+      const frame = properties
+        ? Array.from(properties.children).find((child) => child.localName === "framePr")
+        : undefined;
+      const positionTwips = Number(tab ? getXmlAttribute(tab, "pos") : 0);
+      const text = normalizePreviewText(
+        Array.from(paragraph.getElementsByTagName("*"))
+          .filter((child) => child.localName === "t")
+          .map((child) => child.textContent || "")
+          .join("")
+      );
+      return tab && getXmlAttribute(tab, "val") === "right" && positionTwips > 0 && text
+        ? {
+            text,
+            positionPt: positionTwips / 20,
+            pageBottomFrame: Boolean(frame && getXmlAttribute(frame, "yAlign") === "bottom")
+          }
+        : undefined;
+    })
+    .filter((hint): hint is DocxLayoutHints["rightTabParagraphs"][number] => Boolean(hint));
+}
+
+function repairDocxRightTabStops(
+  container: HTMLElement,
+  hints: DocxLayoutHints["rightTabParagraphs"]
+): void {
+  if (hints.length === 0) {
+    return;
+  }
+  const paragraphs = Array.from(container.querySelectorAll<HTMLParagraphElement>("section.ofv-docx p")).filter(
+    (paragraph) => paragraph.querySelectorAll(".ofv-docx-tab-stop").length === 1
+  );
+  const candidatesByText = new Map<string, HTMLParagraphElement[]>();
+  for (const paragraph of paragraphs) {
+    const text = normalizePreviewText(paragraph.textContent || "");
+    const candidates = candidatesByText.get(text) || [];
+    candidates.push(paragraph);
+    candidatesByText.set(text, candidates);
+  }
+  for (const hint of hints) {
+    const paragraph = candidatesByText.get(hint.text)?.shift();
+    if (paragraph) {
+      repairDocxRightTabParagraph(paragraph, hint);
+    }
+  }
+}
+
+function repairDocxRightTabParagraph(
+  paragraph: HTMLParagraphElement,
+  hint: DocxLayoutHints["rightTabParagraphs"][number]
+): void {
+  const tabStop = paragraph.querySelector<HTMLElement>(".ofv-docx-tab-stop");
+  if (!tabStop || paragraph.querySelector(".ofv-docx-right-tab-line")) {
+    return;
+  }
+  let tabRun: HTMLElement = tabStop;
+  while (tabRun.parentElement && tabRun.parentElement !== paragraph) {
+    tabRun = tabRun.parentElement;
+  }
+  if (tabRun.parentElement !== paragraph) {
+    return;
+  }
+  const nodes = Array.from(paragraph.childNodes);
+  const tabIndex = nodes.indexOf(tabRun);
+  const before = nodes.slice(0, tabIndex);
+  const after = nodes.slice(tabIndex + 1);
+  if (tabIndex < 0 || normalizePreviewText(after.map((node) => node.textContent || "").join("")) === "") {
+    return;
+  }
+
+  const line = document.createElement("span");
+  line.className = "ofv-docx-right-tab-line";
+  line.style.setProperty("--ofv-docx-right-tab-position", `${formatCssNumber(hint.positionPt)}pt`);
+  const start = document.createElement("span");
+  start.className = "ofv-docx-right-tab-start";
+  start.append(...before);
+  const end = document.createElement("span");
+  end.className = "ofv-docx-right-tab-end";
+  end.append(...after);
+  line.append(start, end);
+  tabRun.classList.add("ofv-docx-right-tab-source");
+  if (hint.pageBottomFrame) {
+    paragraph.classList.add("ofv-docx-page-bottom-frame");
+  }
+  paragraph.replaceChildren(line, tabRun);
 }
 
 function extractDocxEastAsiaFonts(stylesXml: string, themeXml: string): DocxLayoutHints["eastAsiaFonts"] {
@@ -1885,6 +2117,25 @@ function paginateDocxFlow(container: HTMLElement): void {
   for (const sourcePage of sourcePages) {
     paginateDocxPage(sourcePage);
   }
+  updateDocxContinuationPageNumbers(wrapper);
+}
+
+function updateDocxContinuationPageNumbers(wrapper: HTMLElement): void {
+  let currentPageNumber: number | undefined;
+  for (const page of wrapper.querySelectorAll<HTMLElement>(":scope > section.ofv-docx")) {
+    const field = page.querySelector<HTMLElement>("footer .ofv-docx-page-number-field");
+    const renderedPageNumber = Number.parseInt(normalizePreviewText(field?.textContent || ""), 10);
+    if (!field || !Number.isFinite(renderedPageNumber)) {
+      currentPageNumber = undefined;
+      continue;
+    }
+    if (page.dataset.ofvDocxFlowContinuation === "true" && currentPageNumber !== undefined) {
+      currentPageNumber += 1;
+      field.textContent = String(currentPageNumber);
+    } else {
+      currentPageNumber = renderedPageNumber;
+    }
+  }
 }
 
 function paginateDocxPage(sourcePage: HTMLElement): void {
@@ -1892,13 +2143,22 @@ function paginateDocxPage(sourcePage: HTMLElement): void {
     (child): child is HTMLElement => child instanceof HTMLElement && child.tagName === "ARTICLE"
   );
   const nominalHeight = parseCssLengthInPixels(sourcePage.style.height || sourcePage.style.minHeight);
-  if (!flowRoot || nominalHeight <= 0 || flowRoot.children.length < 2) {
+  if (!flowRoot || nominalHeight <= 0) {
     return;
   }
 
-  const blocks = Array.from(flowRoot.children);
+  const allBlocks = Array.from(flowRoot.children);
+  const bottomFrames = allBlocks.filter(
+    (block): block is HTMLElement => block instanceof HTMLElement && block.classList.contains("ofv-docx-page-bottom-frame")
+  );
+  const blocks = allBlocks.filter((block) => !bottomFrames.includes(block as HTMLElement));
+  if (blocks.length < 2) {
+    attachDocxPageBottomFrames(sourcePage, bottomFrames);
+    return;
+  }
   const lastBlock = blocks.at(-1);
   if (!(lastBlock instanceof HTMLElement) || !docxBlockExceedsPage(lastBlock, sourcePage, nominalHeight)) {
+    attachDocxPageBottomFrames(sourcePage, bottomFrames);
     return;
   }
 
@@ -1934,6 +2194,16 @@ function paginateDocxPage(sourcePage: HTMLElement): void {
       pageFlow.append(overflowBlock);
       continuationCount += 1;
     }
+  }
+  attachDocxPageBottomFrames(page, bottomFrames);
+}
+
+function attachDocxPageBottomFrames(page: HTMLElement, frames: HTMLElement[]): void {
+  for (const frame of frames) {
+    frame.style.left = page.style.paddingLeft || "0px";
+    frame.style.right = page.style.paddingRight || "0px";
+    frame.style.bottom = page.style.paddingBottom || "0px";
+    page.append(frame);
   }
 }
 
@@ -2150,7 +2420,7 @@ function fitDocxPages(container: HTMLElement, fit: PreviewFit): () => void {
     }
 
     const availableWidth = Math.max(1, container.clientWidth - 48);
-    const availableHeight = container.clientHeight > 0 ? Math.max(1, container.clientHeight - 48) : undefined;
+    const availableHeight = getDocxFitAvailableHeight(container);
     const pageWidth = Math.max(
       1,
       ...frames.map(({ page }) => {
@@ -2203,6 +2473,21 @@ function fitDocxPages(container: HTMLElement, fit: PreviewFit): () => void {
     panel?.removeEventListener("ofv-office-zoom", update);
     observer.disconnect();
   };
+}
+
+function getDocxFitAvailableHeight(container: HTMLElement): number | undefined {
+  const viewport = container.closest<HTMLElement>(".ofv-viewport");
+  const panel = container.closest<HTMLElement>(".ofv-panel");
+  let fittingHeight = container.clientHeight;
+
+  if (viewport && viewport.clientHeight > 0) {
+    const panelStyle = panel ? getComputedStyle(panel) : undefined;
+    const panelPadding =
+      parseCssPixelValue(panelStyle?.paddingTop || "") + parseCssPixelValue(panelStyle?.paddingBottom || "");
+    fittingHeight = viewport.clientHeight - panelPadding;
+  }
+
+  return fittingHeight > 0 ? Math.max(1, fittingHeight - 48) : undefined;
 }
 
 function getDocxFitScale(

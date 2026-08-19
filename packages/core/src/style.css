@@ -1713,6 +1713,7 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  margin-inline: auto;
   padding: 24px;
   overflow: hidden;
   background: transparent;
@@ -1761,6 +1762,28 @@
 .ofv-docx-document section.ofv-docx table {
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+.ofv-docx-right-tab-line {
+  display: flex;
+  align-items: baseline;
+  width: var(--ofv-docx-right-tab-position);
+  max-width: 100%;
+}
+
+.ofv-docx-right-tab-end {
+  min-width: 0;
+  margin-inline-start: auto;
+}
+
+.ofv-docx-right-tab-source {
+  display: none !important;
+}
+
+.ofv-docx-page-bottom-frame {
+  position: absolute;
+  z-index: 1;
+  line-height: 1.2;
 }
 
 .ofv-docx-chart-preview {
