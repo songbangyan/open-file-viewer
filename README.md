@@ -523,7 +523,7 @@ createViewer(options: PreviewOptions): FileViewer;
 | `initialIndex` | `number` | `0` | Initial file index |
 | `initialPage` | `number` | `1` | Initial 1-based page for paginated previews |
 | `fileName` | `string` | Auto inferred | File name used for extension detection |
-| `mimeType` | `string` | Auto inferred | MIME type |
+| `mimeType` | `string` | Auto inferred | MIME type. An explicitly supplied text MIME type takes priority over the file extension, so `text/plain` can show Markdown source while `text/markdown` renders it. |
 | `width` | `number \| string` | Original container width | Preview container width |
 | `height` | `number \| string` | Original container height | Preview container height |
 | `zoom` | `number` | `1` | Initial zoom level, where `1` means 100% |

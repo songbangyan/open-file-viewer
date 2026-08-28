@@ -1759,6 +1759,13 @@
   height: auto;
 }
 
+.ofv-docx-document section.ofv-docx svg {
+  stroke: none;
+  stroke-width: initial;
+  stroke-linecap: initial;
+  stroke-linejoin: initial;
+}
+
 .ofv-docx-document section.ofv-docx table {
   max-width: 100%;
   overflow-wrap: anywhere;

@@ -112,6 +112,56 @@ describe("textPlugin", () => {
     expect(container.querySelector(".ofv-markdown-body strong")?.textContent).toBe("bold");
   });
 
+  it("lets an explicit MIME type switch a Markdown file between source and rendered previews", async () => {
+    const text = "# MIME-controlled Markdown\n\n**bold**";
+    const sourceContainer = document.createElement("div");
+    document.body.append(sourceContainer);
+
+    createViewer({
+      container: sourceContainer,
+      file: new Blob([text], { type: "text/markdown" }),
+      fileName: "README.md",
+      mimeType: "text/plain; charset=utf-8",
+      plugins: [textPlugin()]
+    });
+
+    await waitFor(() => Boolean(sourceContainer.querySelector(".ofv-code-container code")));
+
+    expect(sourceContainer.querySelector(".ofv-markdown-body")).toBeNull();
+    expect(sourceContainer.querySelector(".ofv-code-container code")?.textContent).toContain("# MIME-controlled Markdown");
+
+    const previewContainer = document.createElement("div");
+    document.body.append(previewContainer);
+
+    createViewer({
+      container: previewContainer,
+      file: new Blob([text], { type: "text/plain" }),
+      fileName: "README.txt",
+      mimeType: "text/markdown",
+      plugins: [textPlugin()]
+    });
+
+    await waitFor(() => Boolean(previewContainer.querySelector(".ofv-markdown-body h1")));
+
+    expect(previewContainer.querySelector(".ofv-markdown-body h1")?.textContent).toBe("MIME-controlled Markdown");
+  });
+
+  it("keeps extension inference when a Markdown blob MIME is not explicitly overridden", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    createViewer({
+      container,
+      file: new Blob(["# Extension Markdown"], { type: "text/plain" }),
+      fileName: "README.md",
+      plugins: [textPlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-markdown-body h1")));
+
+    expect(container.querySelector(".ofv-markdown-body h1")?.textContent).toBe("Extension Markdown");
+  });
+
   it("supports shared toolbar zoom for markdown previews", async () => {
     const container = document.createElement("div");
     document.body.append(container);

@@ -616,7 +616,7 @@ createViewer(options: PreviewOptions): FileViewer;
 | `initialIndex` | `number` | `0` | 初始文件索引 |
 | `initialPage` | `number` | `1` | 分页预览的初始页码，从 1 开始 |
 | `fileName` | `string` | 自动推断 | 文件名，用于扩展名识别 |
-| `mimeType` | `string` | 自动推断 | MIME 类型 |
+| `mimeType` | `string` | 自动推断 | MIME 类型。显式传入的文本 MIME 类型优先于文件扩展名，因此可用 `text/plain` 展示 Markdown 源码、用 `text/markdown` 展示渲染结果。 |
 | `width` | `number \| string` | 容器原始宽度 | 预览容器宽度 |
 | `height` | `number \| string` | 容器原始高度 | 预览容器高度 |
 | `zoom` | `number` | `1` | 初始缩放比例，`1` 表示 100% |

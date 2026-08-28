@@ -110,6 +110,27 @@ const openPptx = vi.hoisted(() =>
     inheritedText.style.fontSize = "37.35pt";
     inheritedText.textContent = "2027.11.30";
     inheritedPlaceholder.append(inheritedText);
+    const autofitBody = document.createElement("div");
+    autofitBody.className = "pptx-autofit-body";
+    autofitBody.style.position = "absolute";
+    autofitBody.style.left = "49.1307px";
+    autofitBody.style.top = "188.964px";
+    autofitBody.style.width = "952.381px";
+    autofitBody.style.height = "345.2px";
+    const autofitTextLayer = document.createElement("div");
+    for (const text of [
+      "• 不使用 复杂类型定义（泛型、方法重载、条件类型等）",
+      "• 尽量使用常量枚举来定义多个相关常量",
+      "• 显式行距保持不变"
+    ]) {
+      const paragraph = document.createElement("div");
+      const run = document.createElement("span");
+      run.style.fontSize = "32pt";
+      run.textContent = text;
+      paragraph.append(run);
+      autofitTextLayer.append(paragraph);
+    }
+    autofitBody.append(autofitTextLayer);
     const circleCallout = document.createElement("div");
     circleCallout.style.position = "absolute";
     circleCallout.style.left = "12px";
@@ -175,7 +196,7 @@ const openPptx = vi.hoisted(() =>
       box.append(inner);
       diagramGroup.append(box);
     }
-    page.append(mirroredTextGroup, inheritedPlaceholder, circleCallout, redCircleCallout, diagramGroup);
+    page.append(mirroredTextGroup, inheritedPlaceholder, autofitBody, circleCallout, redCircleCallout, diagramGroup);
     viewport.append(page);
     wrapper.append(viewport);
     container.append(wrapper);
@@ -576,9 +597,12 @@ describe("officePlugin", () => {
 
     await waitFor(() => Boolean(container.querySelector(".ofv-column-resize-handle")));
 
-    const firstCell = container.querySelector<HTMLTableCellElement>('[data-cell="A1"]');
-    const handle = firstCell?.querySelector<HTMLElement>(".ofv-column-resize-handle");
-    firstCell!.getBoundingClientRect = () =>
+    const resizeHandles = Array.from(container.querySelectorAll<HTMLElement>(".ofv-column-resize-handle"));
+    expect(resizeHandles.map((handle) => handle.dataset.columnIndex)).toEqual(["2", "0", "1"]);
+
+    const firstColumnCell = container.querySelector<HTMLTableCellElement>('[data-cell="A2"]');
+    const handle = firstColumnCell?.querySelector<HTMLElement>('.ofv-column-resize-handle[data-column-index="0"]');
+    firstColumnCell!.getBoundingClientRect = () =>
       ({ width: 120, height: 24, top: 0, right: 120, bottom: 24, left: 0, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
     handle!.setPointerCapture = vi.fn();
 
@@ -856,6 +880,41 @@ describe("officePlugin", () => {
     expect(container.querySelectorAll(".ofv-docx-chart-preview .ofv-chart-svg rect[data-index]")).toHaveLength(3);
     expect(container.querySelector(".ofv-docx-chart-preview .ofv-chart-title")?.textContent).toBe("Quarterly Revenue");
     expect(container.querySelectorAll(".ofv-docx-chart-preview .ofv-chart-gridline").length).toBeGreaterThan(0);
+  });
+
+  it("preserves DOCX chart axis bounds, date labels, and mixed bar-line series", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.innerHTML = `<p><span><div style="display:inline-block;position:relative;width:320pt;height:180pt"></div></span></p>`;
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+    });
+
+    createViewer({
+      container,
+      file: await createDocxWithChart("combo"),
+      fileName: "combo-chart.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-docx-chart-preview .ofv-chart-svg")));
+
+    const chart = container.querySelector(".ofv-docx-chart-preview .ofv-chart-svg");
+    const labels = Array.from(chart?.querySelectorAll('[data-axis="category"]') || []).map((label) => label.textContent);
+    const ticks = Array.from(chart?.querySelectorAll(".ofv-chart-label") || []).map((label) => label.textContent);
+    expect(labels).toEqual(["2022/6", "2022/7"]);
+    expect(chart?.querySelectorAll("rect[data-index]")).toHaveLength(3);
+    expect(chart?.querySelectorAll("polyline")).toHaveLength(1);
+    expect(chart?.querySelectorAll(".ofv-chart-secondary-axis-label")).toHaveLength(4);
+    expect(ticks).toContain("-60%");
+    expect(ticks).toContain("14");
+    expect(chart?.querySelector(".ofv-chart-axis-title")?.textContent).toBe("(万辆)");
+    expect(chart?.querySelector(".ofv-chart-title")).toBeNull();
   });
 
   it("renders flat ODS spreadsheets with repeated cells and formulas", async () => {
@@ -1390,6 +1449,53 @@ describe("officePlugin", () => {
     expect(pages[1]?.querySelector("header")?.textContent).toBe("Repeated header");
     expect(pages[1]?.dataset.ofvDocxFlowContinuation).toBe("true");
     expect(pages.map((page) => page.querySelector("footer")?.textContent)).toEqual(["-2-", "-3-", "-4-"]);
+  });
+
+  it("moves a short overflowing DOCX paragraph to the next page without splitting it", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.style.width = "600px";
+      page.style.minHeight = "200px";
+      page.style.padding = "20px";
+      const article = document.createElement("article");
+      const heading = document.createElement("p");
+      heading.textContent = "Page heading";
+      const paragraph = document.createElement("p");
+      paragraph.textContent = "This short paragraph should move to the next page as one intact block.";
+      article.append(heading, paragraph);
+      page.append(article);
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+
+      heading.getBoundingClientRect = () => ({
+        x: 20, y: 20, top: 20, right: 580, bottom: 150, left: 20, width: 560, height: 130, toJSON: () => ({})
+      });
+      paragraph.getBoundingClientRect = () => {
+        const firstOnPage = paragraph.parentElement?.firstElementChild === paragraph;
+        const top = firstOnPage ? 20 : 150;
+        return { x: 20, y: top, top, right: 580, bottom: top + 60, left: 20, width: 560, height: 60, toJSON: () => ({}) };
+      };
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: new Blob(["docx"], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+      fileName: "short-paragraph.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("section.ofv-docx").length === 2);
+    const pages = Array.from(container.querySelectorAll<HTMLElement>("section.ofv-docx"));
+    expect(pages[0]?.querySelector("article")?.textContent).toBe("Page heading");
+    expect(pages[1]?.querySelector("article p")?.textContent).toBe(
+      "This short paragraph should move to the next page as one intact block."
+    );
+    expect(pages[1]?.querySelector<HTMLElement>("article p")?.dataset.ofvDocxParagraphContinuation).toBeUndefined();
   });
 
   it("splits an overflowing DOCX paragraph across pages without losing rich text", async () => {
@@ -2115,6 +2221,91 @@ describe("officePlugin", () => {
     expect(imageWrappers[1].style.width).toBe("48pt");
   });
 
+  it("restores nested floating textbox content and positions header images from their OOXML anchors", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.style.width = "595.3pt";
+      page.style.padding = "72pt 90pt";
+      page.innerHTML = `
+        <header style="margin-top:calc(-28px);min-height:calc(28px)">
+          <p><span><div style="display:inline-block;position:relative;width:49.95pt;height:31.65pt;float:left"><img src="data:image/png;base64,AA==" /></div></span></p>
+        </header>
+        <article>
+          <p><span><svg width="0" height="0" style="position:absolute;left:0pt;margin-left:-16.45pt;margin-top:131.05pt;height:50.7pt;width:449.4pt"><image width="100%" height="100%"><foreignObject width="100%" height="100%"><p>Floating textbox title should remain visible</p></foreignObject></image></svg></span></p>
+        </article>`;
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+    });
+
+    createViewer({
+      container,
+      file: await createFloatingTextboxAndHeaderDocx(),
+      fileName: "floating-textbox.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector("svg[data-ofv-docx-textbox-repaired='true']")));
+
+    const shape = container.querySelector<SVGSVGElement>("svg[data-ofv-docx-textbox-repaired='true']");
+    const foreignObject = shape?.querySelector("foreignObject");
+    const headerImageWrapper = container.querySelector<HTMLImageElement>("header img")?.parentElement as HTMLElement;
+    expect(foreignObject?.parentElement).toBe(shape);
+    expect(shape?.style.marginLeft).toBe("73.55pt");
+    expect(shape?.style.top).toBe("131.05pt");
+    expect(shape?.style.marginTop).toBe("0pt");
+    expect(headerImageWrapper.dataset.ofvDocxFloatRepaired).toBe("true");
+    expect(headerImageWrapper.style.position).toBe("absolute");
+    expect(headerImageWrapper.style.left).toBe("90.4pt");
+    expect(headerImageWrapper.style.top).toBe("35.65pt");
+    expect(headerImageWrapper.style.width).toBe("49.95pt");
+  });
+
+  it("aligns a DOCX cover title background and paired floating text panels", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.style.width = "595.3pt";
+      page.style.padding = "72pt 90pt";
+      const shape = (text: string, width: number, height: number) =>
+        `<p><svg width="0" height="0" style="position:absolute;width:${width}pt;height:${height}pt"><image><foreignObject width="100%" height="100%"><p>${text}</p></foreignObject></image></svg></p>`;
+      page.innerHTML = `<article>${shape("", 452, 79.3)}${shape("Cover title", 449.4, 50.7)}${shape("Left summary", 245.55, 474.95)}${shape("Right details", 193.1, 393.3)}</article>`;
+      const imagePage = document.createElement("section");
+      imagePage.className = "ofv-docx";
+      imagePage.innerHTML = `<article><p><span><div style="display:inline-block;position:relative;width:413.5pt;height:392pt"><img class="cover-layout-inline-image" src="data:image/png;base64,AA==" /></div></span></p></article>`;
+      wrapper.append(page, imagePage);
+      bodyContainer.append(wrapper);
+    });
+
+    createViewer({
+      container,
+      file: await createDocxCoverPageFloatingLayout(),
+      fileName: "cover-layout.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("svg[data-ofv-docx-textbox-repaired='true']").length === 4);
+
+    const shapes = Array.from(container.querySelectorAll<SVGSVGElement>("svg[data-ofv-docx-textbox-repaired='true']"));
+    expect(shapes[0]?.style.top).toBe("116.75pt");
+    expect(shapes[0]?.style.marginTop).toBe("0pt");
+    expect(shapes[1]?.style.top).toBe("131.05pt");
+    expect(shapes[2]?.style.top).toBe("246.75pt");
+    expect(shapes[3]?.style.top).toBe("246.75pt");
+    const inlineImageWrapper = container.querySelector<HTMLImageElement>(".cover-layout-inline-image")?.parentElement as HTMLElement;
+    expect(inlineImageWrapper.dataset.ofvDocxFloatRepaired).toBeUndefined();
+    expect(inlineImageWrapper.style.position).toBe("relative");
+    expect(inlineImageWrapper.style.width).toBe("413.5pt");
+  });
+
   it("deduplicates textbox DOCX fallback paragraphs from compatibility markup", async () => {
     const container = document.createElement("div");
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -2246,6 +2437,25 @@ describe("officePlugin", () => {
     const placeholder = container.querySelector<HTMLElement>(".pptx-inherited-placeholder");
     expect(placeholder?.dataset.ofvPptxPlaceholderFont).toBe("24");
     expect(placeholder?.querySelector<HTMLElement>("span")?.style.fontSize).toBe("24pt");
+  });
+
+  it("uses PowerPoint default line height for autofit paragraphs without explicit spacing", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    createViewer({
+      container,
+      file: await createPptxAutofitLineHeightFixture(),
+      fileName: "autofit-line-height.pptx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("[data-ofv-pptx-default-line-height='true']").length === 2);
+
+    const paragraphs = container.querySelectorAll<HTMLElement>(".pptx-autofit-body div > div");
+    expect(paragraphs[0]?.style.lineHeight).toBe("1");
+    expect(paragraphs[1]?.style.lineHeight).toBe("1");
+    expect(paragraphs[2]?.style.lineHeight).toBe("");
   });
 
   it("falls back to extracted slide text when PPTX rendering times out", async () => {
@@ -3019,6 +3229,101 @@ async function createMultipleFloatingPicturesDocx(): Promise<Blob> {
   });
 }
 
+async function createFloatingTextboxAndHeaderDocx(): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    "word/document.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:document
+        xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+        <w:body>
+          <w:p><w:r><w:drawing><wp:anchor>
+            <wp:positionH relativeFrom="column"><wp:posOffset>-208915</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="page"><wp:posOffset>1664335</wp:posOffset></wp:positionV>
+            <wp:extent cx="5707380" cy="643890"/><wp:wrapNone/>
+            <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+              <wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>Floating textbox title should remain visible</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp>
+            </a:graphicData></a:graphic>
+          </wp:anchor></w:drawing></w:r></w:p>
+          <w:p><w:r><w:drawing><wp:anchor>
+            <wp:positionH relativeFrom="column"><wp:posOffset>2540000</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="paragraph"><wp:posOffset>127000</wp:posOffset></wp:positionV>
+            <wp:extent cx="2540000" cy="2540000"/><wp:wrapSquare wrapText="bothSides"/>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic/></a:graphicData></a:graphic>
+          </wp:anchor></w:drawing></w:r></w:p>
+        </w:body>
+      </w:document>`
+  );
+  zip.file(
+    "word/header1.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:hdr
+        xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <w:p><w:r><w:drawing><wp:anchor>
+          <wp:positionH relativeFrom="column"><wp:posOffset>5080</wp:posOffset></wp:positionH>
+          <wp:positionV relativeFrom="paragraph"><wp:posOffset>-194945</wp:posOffset></wp:positionV>
+          <wp:extent cx="634365" cy="401955"/><wp:wrapSquare wrapText="right"/>
+          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic/></a:graphicData></a:graphic>
+        </wp:anchor></w:drawing></w:r></w:p>
+      </w:hdr>`
+  );
+  return zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
+async function createDocxCoverPageFloatingLayout(): Promise<Blob> {
+  const zip = new JSZip();
+  const anchor = (options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    relativeV: "page" | "paragraph";
+    text?: string;
+    fill?: string;
+    nestedPicture?: boolean;
+  }) => `<w:p><w:r><w:drawing><wp:anchor>
+    <wp:positionH relativeFrom="column"><wp:posOffset>${Math.round(options.x * 12700)}</wp:posOffset></wp:positionH>
+    <wp:positionV relativeFrom="${options.relativeV}"><wp:posOffset>${Math.round(options.y * 12700)}</wp:posOffset></wp:positionV>
+    <wp:extent cx="${Math.round(options.width * 12700)}" cy="${Math.round(options.height * 12700)}"/><wp:wrapNone/>
+    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>
+      <wps:spPr>${options.fill ? `<a:solidFill><a:srgbClr val="${options.fill}"/></a:solidFill>` : "<a:noFill/>"}</wps:spPr>
+      <wps:txbx><w:txbxContent><w:p><w:r><w:t>${options.text || ""}</w:t></w:r></w:p>
+        ${options.nestedPicture ? `<w:p><w:r><w:drawing><wp:inline><wp:extent cx="5251450" cy="4978400"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>` : ""}
+      </w:txbxContent></wps:txbx>
+    </wps:wsp></a:graphicData></a:graphic>
+  </wp:anchor></w:drawing></w:r></w:p>`;
+  zip.file(
+    "word/document.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+        <w:body>
+          ${anchor({ x: -16.2, y: 7.55, width: 452, height: 79.3, relativeV: "paragraph", fill: "043885" })}
+          ${anchor({ x: -16.45, y: 131.05, width: 449.4, height: 50.7, relativeV: "page", text: "Cover title" })}
+          ${anchor({ x: -12.1, y: 22.6, width: 245.55, height: 474.95, relativeV: "paragraph", text: "Left summary", fill: "FFFFFF" })}
+          ${anchor({ x: 241.4, y: 8.45, width: 193.1, height: 393.3, relativeV: "paragraph", text: "Right details", fill: "FFFFFF", nestedPicture: true })}
+        </w:body>
+      </w:document>`
+  );
+  return zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
 async function createDuplicatedTextboxDocx(...texts: string[]): Promise<Blob> {
   const zip = new JSZip();
   const paragraphs = texts.map((text) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`).join("");
@@ -3433,8 +3738,48 @@ async function createWorkbookWithChart(type: "bar" | "line" = "bar"): Promise<Bl
   });
 }
 
-async function createDocxWithChart(): Promise<Blob> {
+async function createDocxWithChart(kind: "bar" | "combo" = "bar"): Promise<Blob> {
   const zip = new JSZip();
+  const chartXml =
+    kind === "combo"
+      ? `<?xml version="1.0" encoding="UTF-8"?>
+        <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <c:chart><c:plotArea>
+            <c:barChart><c:barDir val="col"/><c:ser>
+              <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>日均零售</c:v></c:pt></c:strCache></c:strRef></c:tx>
+              <c:cat><c:numRef><c:numCache><c:formatCode>yyyy/m/d</c:formatCode>
+                <c:pt idx="0"><c:v>44717</c:v></c:pt><c:pt idx="1"><c:v>44724</c:v></c:pt><c:pt idx="2"><c:v>44752</c:v></c:pt>
+              </c:numCache></c:numRef></c:cat>
+              <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt><c:pt idx="2"><c:v>12</c:v></c:pt></c:numCache></c:numRef></c:val>
+            </c:ser><c:axId val="cat1"/><c:axId val="val1"/></c:barChart>
+            <c:lineChart><c:ser>
+              <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>同比增速</c:v></c:pt></c:strCache></c:strRef></c:tx>
+              <c:cat><c:numRef><c:numCache><c:formatCode>yyyy/m/d</c:formatCode>
+                <c:pt idx="0"><c:v>44717</c:v></c:pt><c:pt idx="1"><c:v>44724</c:v></c:pt><c:pt idx="2"><c:v>44752</c:v></c:pt>
+              </c:numCache></c:numRef></c:cat>
+              <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>-0.2</c:v></c:pt><c:pt idx="1"><c:v>0.2</c:v></c:pt><c:pt idx="2"><c:v>0.6</c:v></c:pt></c:numCache></c:numRef></c:val>
+            </c:ser><c:axId val="cat2"/><c:axId val="val2"/></c:lineChart>
+            <c:valAx><c:axId val="val1"/><c:scaling><c:min val="0"/><c:max val="14"/></c:scaling><c:axPos val="l"/>
+              <c:title><c:tx><c:rich><a:p><a:r><a:t>(万辆)</a:t></a:r></a:p></c:rich></c:tx></c:title><c:majorUnit val="7"/>
+            </c:valAx>
+            <c:valAx><c:axId val="val2"/><c:scaling><c:min val="-0.6"/><c:max val="0.6"/></c:scaling><c:axPos val="r"/>
+              <c:numFmt formatCode="0%"/><c:majorUnit val="0.4"/>
+            </c:valAx>
+          </c:plotArea></c:chart>
+        </c:chartSpace>`
+      : `<?xml version="1.0" encoding="UTF-8"?>
+        <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <c:chart>
+            <c:title><c:tx><c:rich><a:p><a:r><a:t>Quarterly Revenue</a:t></a:r></a:p></c:rich></c:tx></c:title>
+            <c:plotArea><c:barChart><c:ser>
+              <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx>
+              <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt></c:strCache></c:strRef></c:cat>
+              <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>12</c:v></c:pt><c:pt idx="1"><c:v>18</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:numCache></c:numRef></c:val>
+            </c:ser></c:barChart></c:plotArea>
+          </c:chart>
+        </c:chartSpace>`;
   zip.file(
     "[Content_Types].xml",
     `<?xml version="1.0" encoding="UTF-8"?>
@@ -3481,30 +3826,7 @@ async function createDocxWithChart(): Promise<Blob> {
   );
   zip.file(
     "word/charts/chart1.xml",
-    `<?xml version="1.0" encoding="UTF-8"?>
-      <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
-        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
-        <c:chart>
-          <c:title><c:tx><c:rich><a:p><a:r><a:t>Quarterly Revenue</a:t></a:r></a:p></c:rich></c:tx></c:title>
-          <c:plotArea>
-            <c:barChart>
-              <c:ser>
-                <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx>
-                <c:cat><c:strRef><c:strCache>
-                  <c:pt idx="0"><c:v>Q1</c:v></c:pt>
-                  <c:pt idx="1"><c:v>Q2</c:v></c:pt>
-                  <c:pt idx="2"><c:v>Q3</c:v></c:pt>
-                </c:strCache></c:strRef></c:cat>
-                <c:val><c:numRef><c:numCache>
-                  <c:pt idx="0"><c:v>12</c:v></c:pt>
-                  <c:pt idx="1"><c:v>18</c:v></c:pt>
-                  <c:pt idx="2"><c:v>30</c:v></c:pt>
-                </c:numCache></c:numRef></c:val>
-              </c:ser>
-            </c:barChart>
-          </c:plotArea>
-        </c:chart>
-      </c:chartSpace>`
+    chartXml
   );
   return zip.generateAsync({
     type: "blob",
@@ -3876,6 +4198,38 @@ async function createPptxPlaceholderInheritanceFixture(): Promise<Blob> {
             <p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:defRPr sz="2400"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
         </p:spTree></p:cSld>
       </p:sldLayout>`
+  );
+  return zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  });
+}
+
+async function createPptxAutofitLineHeightFixture(): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    "ppt/presentation.xml",
+    `<?xml version="1.0" encoding="UTF-8"?>
+      <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+        <p:sldSz cx="12192000" cy="6858000"/>
+      </p:presentation>`
+  );
+  zip.file(
+    "ppt/slides/slide1.xml",
+    `<?xml version="1.0" encoding="UTF-8"?>
+      <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+        <p:cSld><p:spTree><p:sp>
+          <p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr txBox="1"/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="467970" y="1799886"/><a:ext cx="9071428" cy="3288032"/></a:xfrm></p:spPr>
+          <p:txBody>
+            <a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/>
+            <a:p><a:r><a:rPr sz="3200"/><a:t>不使用 复杂类型定义（泛型、方法重载、条件类型等）</a:t></a:r></a:p>
+            <a:p><a:r><a:rPr sz="3200"/><a:t>尽量使用常量枚举来定义多个相关常量</a:t></a:r></a:p>
+            <a:p><a:pPr><a:lnSpc><a:spcPts val="3200"/></a:lnSpc></a:pPr><a:r><a:rPr sz="3200"/><a:t>显式行距保持不变</a:t></a:r></a:p>
+          </p:txBody>
+        </p:sp></p:spTree></p:cSld>
+      </p:sld>`
   );
   return zip.generateAsync({
     type: "blob",

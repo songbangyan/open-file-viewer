@@ -1,5 +1,5 @@
 /// <reference path="../shims-text.d.ts" />
-import { isTextLike } from "../detect";
+import { hasExplicitMimeType, isTextLike } from "../detect";
 import { formatPreviewMessage } from "../messages";
 import type { PreviewCommand, PreviewContext, PreviewInstance, PreviewMessages, PreviewPlugin } from "../types";
 import { createLrcPreviewViews, parseLrc } from "./lrc";
@@ -133,6 +133,7 @@ const mimeLangMap: Record<string, string> = {
   "text/lrc": "none",
   "text/x-lrc": "none",
   "text/markdown": "markdown",
+  "text/plain": "none",
   "text/vnd.mermaid": "mermaid",
   "text/html": "markup",
   "application/xml": "markup",
@@ -180,7 +181,7 @@ export function textPlugin(): PreviewPlugin {
     },
     async render(ctx) {
       const ext = ctx.file.extension.toLowerCase();
-      const lang = getTextLanguage(ctx.file.name, ext, ctx.file.mimeType);
+      const lang = getTextLanguage(ctx.file.name, ext, ctx.file.mimeType, hasExplicitMimeType(ctx.file));
       const isLrc =
         ext === "lrc" || ["application/lrc", "application/x-lrc", "text/lrc", "text/x-lrc"].includes(ctx.file.mimeType);
       const defaultWrapped = lang === "none";
@@ -692,13 +693,16 @@ function createTextZoomController(
   };
 }
 
-function getTextLanguage(fileName: string, extension: string, mimeType: string): string {
+function getTextLanguage(fileName: string, extension: string, mimeType: string, preferMimeType: boolean): string {
   const normalizedFileName = normalizeFileName(fileName);
+  const normalizedMimeType = mimeType.split(";", 1)[0]?.trim().toLowerCase() || "";
+  const mimeLanguage = mimeLangMap[normalizedMimeType];
   return (
+    (preferMimeType ? mimeLanguage : undefined) ||
     langMap[extension] ||
     filenameLangMap[normalizedFileName] ||
     filenameLangMap[normalizedFileName.split(".")[0]] ||
-    mimeLangMap[mimeType.toLowerCase()] ||
+    mimeLanguage ||
     "none"
   );
 }

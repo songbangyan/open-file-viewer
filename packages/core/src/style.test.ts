@@ -102,6 +102,8 @@ describe("core responsive styles", () => {
         ".ofv-docx-document section.ofv-docx img,\n.ofv-docx-document section.ofv-docx svg,\n.ofv-docx-document section.ofv-docx canvas,\n.ofv-docx-document section.ofv-docx video"
       )
     ).toContain("max-width: 100%");
+    expect(rule(".ofv-docx-document section.ofv-docx svg")).toContain("stroke: none");
+    expect(rule(".ofv-docx-document section.ofv-docx svg")).toContain("stroke-width: initial");
     expect(rule(".ofv-code-container")).toContain("max-width: 100%");
     expect(rule(".ofv-code-body")).toContain("overflow: auto");
     expect(rule(".ofv-code-body")).toContain("isolation: isolate");

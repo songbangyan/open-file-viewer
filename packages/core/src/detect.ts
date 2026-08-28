@@ -285,51 +285,64 @@ export async function normalizeFile(
   if (typeof source === "string") {
     const name = fileName || getFileNameFromUrl(source) || "remote-file";
     const extension = getExtension(name);
-    return {
+    return rememberExplicitMimeType({
       source,
       name,
       extension,
       mimeType: mimeType || extensionMimeMap[extension] || "",
       url: source
-    };
+    }, mimeType);
   }
 
   if (source instanceof File) {
     const extension = getExtension(fileName || source.name);
-    return {
+    return rememberExplicitMimeType({
       source,
       name: fileName || source.name,
       extension,
       mimeType: mimeType || source.type || extensionMimeMap[extension] || "",
       size: source.size,
       blob: source
-    };
+    }, mimeType);
   }
 
   if (source instanceof Blob) {
     const name = fileName || "blob";
     const extension = getExtension(name);
-    return {
+    return rememberExplicitMimeType({
       source,
       name,
       extension,
       mimeType: mimeType || source.type || extensionMimeMap[extension] || "",
       size: source.size,
       blob: source
-    };
+    }, mimeType);
   }
 
   const name = fileName || "buffer";
   const extension = getExtension(name);
   const blob = new Blob([source], { type: mimeType || extensionMimeMap[extension] || "" });
-  return {
+  return rememberExplicitMimeType({
     source,
     name,
     extension,
     mimeType: blob.type,
     size: blob.size,
     blob
-  };
+  }, mimeType);
+}
+
+const filesWithExplicitMimeType = new WeakSet<PreviewFile>();
+
+function rememberExplicitMimeType(file: PreviewFile, mimeType?: string): PreviewFile {
+  if (mimeType) {
+    filesWithExplicitMimeType.add(file);
+  }
+  return file;
+}
+
+export function hasExplicitMimeType(file: PreviewFile): boolean {
+  return filesWithExplicitMimeType.has(file);
 }
 
 function getFileNameFromUrl(source: string): string {

@@ -1421,12 +1421,14 @@ async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuf
   normalizeDocxNumberingStyles(styleContainer);
   repairDocxSvgImageAlternatives(container, svgImageAlternatives);
   repairUnexpectedDocxTableTextDirections(container, hints.hasVerticalTextDirection);
+  repairDocxFloatingShapeTextboxes(container, hints.floatingShapes);
   repairDocxChartPlaceholders(container, charts);
   repairDocxComplexScriptFontSizes(container, hints.complexScriptFontSizeParagraphs);
   const pages = container.querySelectorAll<HTMLElement>("section.ofv-docx");
   for (const page of pages) {
     repairDocxShapeFills(page);
     repairDocxFloatingPictures(page, hints);
+    repairDocxHeaderFloatingPictures(page, hints);
     repairDocxHeadingShapeAlignment(page);
     repairDocxListIndentAlignment(page);
     for (const element of page.querySelectorAll<HTMLElement>("[style*='line-height']")) {
@@ -1661,6 +1663,25 @@ type DocxLayoutHints = {
     relativeToParagraph: boolean;
     wrap: string;
   }>;
+  headerFloatingPictures: Array<{
+    widthPt: number;
+    heightPt: number;
+    offsetXPt: number;
+    offsetYPt: number;
+    relativeFrom: string;
+    relativeToParagraph: boolean;
+    wrap: string;
+  }>;
+  floatingShapes: Array<{
+    offsetXPt: number;
+    offsetYPt: number;
+    widthPt: number;
+    heightPt: number;
+    relativeFrom: string;
+    relativeV: string;
+    hasFill: boolean;
+    hasText: boolean;
+  }>;
   rightTabParagraphs: Array<{
     text: string;
     positionPt: number;
@@ -1681,15 +1702,21 @@ async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayout
     const footerEntries = Object.values(zip.files).filter(
       (entry) => !entry.dir && /^word\/footer\d+\.xml$/i.test(entry.name)
     );
-    const [documentXml, stylesXml, themeXml, footerXmls] = await Promise.all([
+    const headerEntries = Object.values(zip.files).filter(
+      (entry) => !entry.dir && /^word\/header\d+\.xml$/i.test(entry.name)
+    );
+    const [documentXml, stylesXml, themeXml, footerXmls, headerXmls] = await Promise.all([
       zip.file("word/document.xml")?.async("text"),
       zip.file("word/styles.xml")?.async("text"),
       themeEntry?.async("text"),
-      Promise.all(footerEntries.map((entry) => entry.async("text")))
+      Promise.all(footerEntries.map((entry) => entry.async("text"))),
+      Promise.all(headerEntries.map((entry) => entry.async("text")))
     ]);
     return {
       eastAsiaFonts: extractDocxEastAsiaFonts(stylesXml || "", themeXml || ""),
       floatingPictures: documentXml ? extractFloatingPictureHints(documentXml) : [],
+      headerFloatingPictures: headerXmls.flatMap(extractFloatingPictureHints),
+      floatingShapes: documentXml ? extractFloatingShapeHints(documentXml) : [],
       rightTabParagraphs: documentXml ? extractDocxRightTabParagraphHints(documentXml) : [],
       pageNumberFieldResults: footerXmls.flatMap(extractDocxPageNumberFieldResults),
       complexScriptFontSizeParagraphs: documentXml ? extractDocxComplexScriptFontSizeHints(documentXml) : [],
@@ -1698,6 +1725,8 @@ async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayout
   } catch {
     return {
       floatingPictures: [],
+      headerFloatingPictures: [],
+      floatingShapes: [],
       rightTabParagraphs: [],
       pageNumberFieldResults: [],
       complexScriptFontSizeParagraphs: [],
@@ -2050,7 +2079,10 @@ function sanitizeDocxCssFontFamily(fontFamily: string | undefined): string {
 
 function extractFloatingPictureHints(xml: string): DocxLayoutHints["floatingPictures"] {
   return [...xml.matchAll(/<wp:anchor\b[\s\S]*?<\/wp:anchor>/g)]
-    .filter((match) => /<a:graphicData\b[^>]*uri="http:\/\/schemas\.openxmlformats\.org\/drawingml\/2006\/picture"/.test(match[0]))
+    .filter((match) => {
+      const primaryGraphicType = /<a:graphicData\b[^>]*\buri="([^"]+)"/.exec(match[0])?.[1];
+      return primaryGraphicType === "http://schemas.openxmlformats.org/drawingml/2006/picture";
+    })
     .map((match) => {
       const anchor = match[0];
       const extent = /<wp:extent\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/.exec(anchor);
@@ -2067,6 +2099,29 @@ function extractFloatingPictureHints(xml: string): DocxLayoutHints["floatingPict
       };
     })
     .filter((hint) => hint.widthPt > 0 && hint.heightPt > 0);
+}
+
+function extractFloatingShapeHints(xml: string): DocxLayoutHints["floatingShapes"] {
+  return [...xml.matchAll(/<wp:anchor\b[\s\S]*?<\/wp:anchor>/g)]
+    .filter((match) =>
+      /<a:graphicData\b[^>]*uri="http:\/\/schemas\.microsoft\.com\/office\/word\/2010\/wordprocessingShape"/.test(match[0])
+    )
+    .map((match) => {
+      const anchor = match[0];
+      const offsetX = /<wp:positionH\b[^>]*\brelativeFrom="([^"]+)"[\s\S]*?<wp:posOffset>(-?\d+)<\/wp:posOffset>/.exec(anchor);
+      const offsetY = /<wp:positionV\b[^>]*\brelativeFrom="([^"]+)"[\s\S]*?<wp:posOffset>(-?\d+)<\/wp:posOffset>/.exec(anchor);
+      const extent = /<wp:extent\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/.exec(anchor);
+      return {
+        offsetXPt: emuToPt(Number(offsetX?.[2] || 0)),
+        offsetYPt: emuToPt(Number(offsetY?.[2] || 0)),
+        widthPt: emuToPt(Number(extent?.[1] || 0)),
+        heightPt: emuToPt(Number(extent?.[2] || 0)),
+        relativeFrom: offsetX?.[1] || "",
+        relativeV: offsetY?.[1] || "",
+        hasFill: /<a:solidFill\b/.test(anchor),
+        hasText: /<w:t(?:\s[^>]*)?>[^<\s]/.test(anchor)
+      };
+    });
 }
 
 function emuToPt(value: number): number {
@@ -2099,13 +2154,86 @@ function repairDocxShapeFills(page: HTMLElement): void {
   }
 }
 
+function repairDocxFloatingShapeTextboxes(
+  container: HTMLElement,
+  hints: DocxLayoutHints["floatingShapes"]
+): void {
+  const shapes = Array.from(container.querySelectorAll<SVGSVGElement>("section.ofv-docx article svg")).filter((svg) =>
+    Boolean(svg.querySelector("image > foreignObject"))
+  );
+  for (const shape of shapes) {
+    const foreignObject = shape.querySelector<SVGForeignObjectElement>("image > foreignObject");
+    if (foreignObject) {
+      shape.append(foreignObject);
+      shape.dataset.ofvDocxTextboxRepaired = "true";
+    }
+  }
+  if (shapes.length !== hints.length) {
+    return;
+  }
+  shapes.forEach((shape, index) => {
+    const hint = hints[index];
+    const page = shape.closest<HTMLElement>("section.ofv-docx");
+    if (!page || hint.relativeFrom !== "column") {
+      return;
+    }
+    const pagePaddingLeft = parseCssPixelValue(page.style.paddingLeft || page.style.padding) || 0;
+    shape.style.marginLeft = `${formatCssNumber(pagePaddingLeft + hint.offsetXPt)}pt`;
+    if (hint.relativeV === "page") {
+      shape.style.top = `${formatCssNumber(hint.offsetYPt)}pt`;
+      shape.style.marginTop = "0pt";
+    }
+  });
+  repairDocxCoverPageFloatingLayout(shapes, hints);
+}
+
+function repairDocxCoverPageFloatingLayout(
+  shapes: SVGSVGElement[],
+  hints: DocxLayoutHints["floatingShapes"]
+): void {
+  if (shapes.length < 4 || hints.length < 4) {
+    return;
+  }
+  const [background, title, leftPanel, rightPanel] = hints;
+  if (
+    !background.hasFill ||
+    background.hasText ||
+    background.widthPt < 400 ||
+    background.heightPt < 60 ||
+    !title.hasText ||
+    title.relativeV !== "page" ||
+    title.widthPt < 400 ||
+    !leftPanel.hasText ||
+    !rightPanel.hasText ||
+    leftPanel.relativeV !== "paragraph" ||
+    rightPanel.relativeV !== "paragraph" ||
+    leftPanel.heightPt < 300 ||
+    rightPanel.heightPt < 300 ||
+    leftPanel.widthPt > 300 ||
+    rightPanel.widthPt > 300 ||
+    shapes.slice(0, 4).some((shape) => shape.closest("section.ofv-docx") !== shapes[0]?.closest("section.ofv-docx"))
+  ) {
+    return;
+  }
+  const backgroundTop = Math.max(0, title.offsetYPt + (title.heightPt - background.heightPt) / 2);
+  shapes[0]!.style.top = `${formatCssNumber(backgroundTop)}pt`;
+  shapes[0]!.style.marginTop = "0pt";
+  const panelTop = backgroundTop + background.heightPt + title.heightPt;
+  for (const panel of shapes.slice(2, 4)) {
+    panel.style.top = `${formatCssNumber(panelTop)}pt`;
+    panel.style.marginTop = "0pt";
+  }
+}
+
 function repairDocxFloatingPictures(page: HTMLElement, hints: DocxLayoutHints): void {
   const pageHints = hints.floatingPictures.filter((item) => item.relativeFrom === "column" && item.wrap === "square");
   if (pageHints.length === 0) {
     return;
   }
   const images = Array.from(page.querySelectorAll<HTMLImageElement>("img")).filter(
-    (image) => image.closest<HTMLElement>("[data-ofv-docx-float-repaired='true']") === null
+    (image) =>
+      image.closest("header, footer") === null &&
+      image.closest<HTMLElement>("[data-ofv-docx-float-repaired='true']") === null
   );
   if (images.length === 0 || images.length !== pageHints.length) {
     return;
@@ -2113,7 +2241,29 @@ function repairDocxFloatingPictures(page: HTMLElement, hints: DocxLayoutHints): 
   images.forEach((image, index) => repairDocxFloatingPicture(page, image, pageHints[index]));
 }
 
-function repairDocxFloatingPicture(page: HTMLElement, image: HTMLImageElement, hint: DocxLayoutHints["floatingPictures"][number]): void {
+function repairDocxHeaderFloatingPictures(page: HTMLElement, hints: DocxLayoutHints): void {
+  const images = Array.from(page.querySelectorAll<HTMLImageElement>("header img")).filter(
+    (image) => image.closest<HTMLElement>("[data-ofv-docx-float-repaired='true']") === null
+  );
+  if (images.length === 0 || images.length !== hints.headerFloatingPictures.length) {
+    return;
+  }
+  const pagePaddingLeft = parseCssPixelValue(page.style.paddingLeft || page.style.padding) || 0;
+  const pagePaddingTop = parseCssPixelValue(page.style.paddingTop || page.style.padding) || 0;
+  images.forEach((image, index) => {
+    const header = image.closest<HTMLElement>("header");
+    const headerTop = pagePaddingTop + parseCssLengthInPoints(header?.style.marginTop || "");
+    repairDocxFloatingPicture(page, image, hints.headerFloatingPictures[index], pagePaddingLeft, headerTop);
+  });
+}
+
+function repairDocxFloatingPicture(
+  page: HTMLElement,
+  image: HTMLImageElement,
+  hint: DocxLayoutHints["floatingPictures"][number],
+  horizontalOriginPt = 0,
+  verticalOriginPt?: number
+): void {
   const wrapper = image.parentElement as HTMLElement | null;
   if (!wrapper || wrapper.dataset.ofvDocxFloatRepaired === "true") {
     return;
@@ -2121,10 +2271,10 @@ function repairDocxFloatingPicture(page: HTMLElement, image: HTMLImageElement, h
   const pageWidth = parseCssPixelValue(page.style.width) || page.getBoundingClientRect().width;
   const pagePaddingRight = parseCssPixelValue(page.style.paddingRight || page.style.padding) || 0;
   const width = hint.widthPt;
-  const left = Math.max(0, Math.min(pageWidth - pagePaddingRight - width, hint.offsetXPt));
+  const left = Math.max(0, Math.min(pageWidth - pagePaddingRight - width, horizontalOriginPt + hint.offsetXPt));
   const paragraph = wrapper.closest<HTMLElement>("p");
   const paragraphTop = paragraph ? getElementTopInPt(paragraph, page) : getPagePaddingTopInPt(page);
-  const top = hint.relativeToParagraph ? paragraphTop + hint.offsetYPt : hint.offsetYPt;
+  const top = hint.relativeToParagraph ? (verticalOriginPt ?? paragraphTop) + hint.offsetYPt : hint.offsetYPt;
   wrapper.dataset.ofvDocxFloatRepaired = "true";
   wrapper.style.position = "absolute";
   wrapper.style.float = "none";
@@ -2136,6 +2286,18 @@ function repairDocxFloatingPicture(page: HTMLElement, image: HTMLImageElement, h
   image.style.width = "100%";
   image.style.height = "100%";
   image.style.objectFit = "cover";
+}
+
+function parseCssLengthInPoints(value: string): number {
+  const match = /(-?\d+(?:\.\d+)?)\s*(px|pt)/i.exec(value);
+  if (!match) {
+    return 0;
+  }
+  const amount = Number.parseFloat(match[1] || "");
+  if (!Number.isFinite(amount)) {
+    return 0;
+  }
+  return match[2]?.toLowerCase() === "px" ? amount * 0.75 : amount;
 }
 
 function getElementTopInPt(element: HTMLElement, page: HTMLElement): number {
@@ -2271,7 +2433,9 @@ function paginateDocxPage(sourcePage: HTMLElement): void {
         overflowBlock.remove();
         break;
       }
-      const splitContinuation = splitDocxFlowBlockToFit(overflowBlock, page, nominalHeight);
+      const splitContinuation = shouldMoveDocxParagraphWhole(overflowBlock)
+        ? undefined
+        : splitDocxFlowBlockToFit(overflowBlock, page, nominalHeight);
       if (!splitContinuation && pageFlow.children.length <= 1) {
         break;
       }
@@ -2288,6 +2452,18 @@ function paginateDocxPage(sourcePage: HTMLElement): void {
     }
   }
   attachDocxPageBottomFrames(page, bottomFrames);
+}
+
+function shouldMoveDocxParagraphWhole(block: HTMLElement): boolean {
+  if (block.tagName !== "P" || block.querySelector("img, svg, canvas, video, table")) {
+    return false;
+  }
+  const height = block.getBoundingClientRect().height;
+  if (height <= 0) {
+    return false;
+  }
+  const estimatedLineHeight = Math.max(1, getLargestDocxFontSize(block) * 1.5);
+  return height <= estimatedLineHeight * 6;
 }
 
 function attachDocxPageBottomFrames(page: HTMLElement, frames: HTMLElement[]): void {
@@ -3656,7 +3832,25 @@ type ChartPreview = {
   type: string;
   title: string;
   categories: string[];
-  series: Array<{ name: string; values: number[]; color?: string }>;
+  showLegend: boolean;
+  axes: ChartAxisPreview[];
+  series: Array<{
+    name: string;
+    values: number[];
+    color?: string;
+    type: string;
+    valueAxisId?: string;
+  }>;
+};
+
+type ChartAxisPreview = {
+  id: string;
+  title?: string;
+  min?: number;
+  max?: number;
+  majorUnit?: number;
+  formatCode?: string;
+  position?: string;
 };
 
 type ParsedSheet = {
@@ -3785,12 +3979,32 @@ function parseChartXml(xml: string, fallbackName: string): ChartPreview | null {
     return null;
   }
 
-  const type = detectChartType(doc);
-  const title = readChartTitle(doc, fallbackName);
-  const seriesElements = Array.from(doc.getElementsByTagName("*")).filter((element) => element.localName === "ser");
-  const series = seriesElements
-    .map((element, index) => ({ ...parseChartSeries(element, index), color: readChartSeriesColor(element) }))
-    .filter((item) => item.values.length > 0);
+  const chartTypes = Array.from(doc.getElementsByTagName("*")).filter(
+    (element) => element.localName.endsWith("Chart") && element.localName !== "chart"
+  );
+  const typeNames = [...new Set(chartTypes.map((element) => element.localName.replace(/Chart$/i, "").toLowerCase()))];
+  const type = typeNames.join("+") || "chart";
+  const title = readChartTitle(doc);
+  let seriesIndex = 0;
+  const series = chartTypes.flatMap((chartType) => {
+    const seriesType = chartType.localName.replace(/Chart$/i, "").toLowerCase();
+    const axisIds = Array.from(chartType.children)
+      .filter((element) => element.localName === "axId")
+      .map((element) => element.getAttribute("val") || "")
+      .filter(Boolean);
+    return Array.from(chartType.children)
+      .filter((element) => element.localName === "ser")
+      .map((element) => {
+        const parsed = parseChartSeries(element, seriesIndex);
+        seriesIndex += 1;
+        return {
+          ...parsed,
+          color: readChartSeriesColor(element),
+          type: seriesType,
+          valueAxisId: axisIds[1]
+        };
+      });
+  }).filter((item) => item.values.length > 0);
 
   if (series.length === 0) {
     return null;
@@ -3801,14 +4015,27 @@ function parseChartXml(xml: string, fallbackName: string): ChartPreview | null {
     type,
     title,
     categories: series.find((item) => item.categories.length > 0)?.categories || [],
-    series: series.map((item) => ({ name: item.name, values: item.values, color: item.color }))
+    showLegend: Array.from(doc.getElementsByTagName("*")).some(
+      (element) =>
+        element.localName === "legend" &&
+        !Array.from(element.children).some((child) => child.localName === "delete" && child.getAttribute("val") === "1")
+    ),
+    axes: readChartValueAxes(doc),
+    series: series.map((item) => ({
+      name: item.name,
+      values: item.values,
+      color: item.color,
+      type: item.type,
+      valueAxisId: item.valueAxisId
+    }))
   };
 }
 
-function readChartTitle(doc: Document, fallbackName: string): string {
-  const titleElement = Array.from(doc.getElementsByTagName("*")).find((element) => element.localName === "title");
+function readChartTitle(doc: Document): string {
+  const chart = Array.from(doc.getElementsByTagName("*")).find((element) => element.localName === "chart");
+  const titleElement = Array.from(chart?.children || []).find((element) => element.localName === "title");
   if (!titleElement) {
-    return fallbackName.replace(/\.xml$/i, "");
+    return "";
   }
   const explicitTitle = chartText(titleElement);
   if (explicitTitle) {
@@ -3818,16 +4045,6 @@ function readChartTitle(doc: Document, fallbackName: string): string {
   return /^zh\b/i.test(language) ? "图表标题" : "Chart Title";
 }
 
-function detectChartType(doc: Document): string {
-  const chartType = Array.from(doc.getElementsByTagName("*")).find(
-    (element) => element.localName.endsWith("Chart") && element.localName !== "chart"
-  )?.localName;
-  if (!chartType) {
-    return "chart";
-  }
-  return chartType.replace(/Chart$/i, "").toLowerCase();
-}
-
 function parseChartSeries(
   element: Element,
   index: number
@@ -3835,8 +4052,57 @@ function parseChartSeries(
   return {
     name: textFromFirst(element, "tx") || `Series ${index + 1}`,
     values: numbersFromFirst(element, "val"),
-    categories: stringsFromFirst(element, "cat")
+    categories: readChartCategories(element)
   };
+}
+
+function readChartCategories(series: Element): string[] {
+  const category = Array.from(series.children).find((element) => element.localName === "cat");
+  if (!category) {
+    return [];
+  }
+  const values = chartStringValues(category);
+  const formatCode = Array.from(category.getElementsByTagName("*")).find((element) => element.localName === "formatCode")?.textContent || "";
+  if (!/[ymd]/i.test(formatCode)) {
+    return values;
+  }
+  return values.map((value) => formatExcelChartDate(value) || value);
+}
+
+function formatExcelChartDate(value: string): string | undefined {
+  const serial = Number(value);
+  if (!Number.isFinite(serial) || serial < 1) {
+    return undefined;
+  }
+  const date = new Date(Date.UTC(1899, 11, 30) + Math.round(serial) * 86_400_000);
+  return `${date.getUTCFullYear()}/${date.getUTCMonth() + 1}`;
+}
+
+function readChartValueAxes(doc: Document): ChartAxisPreview[] {
+  return Array.from(doc.getElementsByTagName("*"))
+    .filter((element) => element.localName === "valAx")
+    .map((axis) => {
+      const direct = (localName: string) => Array.from(axis.children).find((element) => element.localName === localName);
+      const scaling = direct("scaling");
+      const scaleValue = (localName: string) => {
+        const value = Array.from(scaling?.children || []).find((element) => element.localName === localName)?.getAttribute("val");
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+      const numericAttribute = (element: Element | undefined) => {
+        const parsed = Number(element?.getAttribute("val"));
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+      return {
+        id: direct("axId")?.getAttribute("val") || "",
+        title: direct("title") ? chartText(direct("title")!) : undefined,
+        min: scaleValue("min"),
+        max: scaleValue("max"),
+        majorUnit: numericAttribute(direct("majorUnit")),
+        formatCode: direct("numFmt")?.getAttribute("formatCode") || undefined,
+        position: direct("axPos")?.getAttribute("val") || undefined
+      };
+    });
 }
 
 function readChartSeriesColor(element: Element | undefined): string | undefined {
@@ -3883,7 +4149,7 @@ function renderChartCard(chart: ChartPreview): HTMLElement {
 
   const header = document.createElement("header");
   const title = document.createElement("h4");
-  title.textContent = chart.title;
+  title.textContent = chart.title || chart.name;
   const meta = document.createElement("span");
   meta.textContent = `${chart.type} · ${chart.series.length} 个系列`;
   header.append(title, meta);
@@ -3914,25 +4180,46 @@ function renderChartSvg(chart: ChartPreview): SVGSVGElement {
   svg.setAttribute("text-rendering", "geometricPrecision");
   svg.setAttribute("shape-rendering", "geometricPrecision");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", chart.title);
+  svg.setAttribute("aria-label", chart.title || chart.name);
   svg.classList.add("ofv-chart-svg");
 
-  const allValues = chart.series.flatMap((item) => item.values).filter((value) => Number.isFinite(value));
-  const max = Math.max(1, ...allValues);
-  const min = Math.min(0, ...allValues);
-  const axisScale = createChartAxisScale(max, min);
-  const axisMax = axisScale.max;
-  const axisMin = axisScale.min;
-  const span = max - min || 1;
   const colors = ["#156082", "#e97132", "#196b24", "#0f9ed5", "#a02b93", "#4ea72e"];
-  const plot = { x: 74, y: 74, width: 526, height: 214 };
+  const hasTitle = Boolean(chart.title);
+  const primarySeries = chart.series[0];
+  const primaryAxisId = primarySeries?.valueAxisId;
+  const primaryScale = createChartSeriesScale(chart, primarySeries);
+  const primaryAxis = chart.axes.find((axis) => axis.id === primaryAxisId);
+  const secondarySeries = chart.series.find((series) => series.valueAxisId && series.valueAxisId !== primaryAxisId);
+  const secondaryScale = secondarySeries ? createChartSeriesScale(chart, secondarySeries) : undefined;
+  const secondaryAxis = secondarySeries ? chart.axes.find((axis) => axis.id === secondarySeries.valueAxisId) : undefined;
+  const plot = { x: 74, y: hasTitle ? 74 : 38, width: secondaryScale ? 500 : 526, height: hasTitle ? 214 : 250 };
   const categories = chart.categories.length > 0 ? chart.categories : chart.series[0]?.values.map((_, index) => String(index + 1)) || [];
 
-  const title = appendSvg(svg, "text", { x: 320, y: 34, class: "ofv-chart-title", "text-anchor": "middle" });
-  title.textContent = chart.title;
+  if (hasTitle) {
+    const title = appendSvg(svg, "text", { x: 320, y: 34, class: "ofv-chart-title", "text-anchor": "middle" });
+    title.textContent = chart.title;
+  }
+  if (primaryAxis?.title) {
+    const axisTitle = appendSvg(svg, "text", {
+      x: plot.x,
+      y: plot.y - 10,
+      class: "ofv-chart-label ofv-chart-axis-title",
+      "text-anchor": "start"
+    });
+    axisTitle.textContent = primaryAxis.title;
+  }
+  if (secondaryAxis?.title) {
+    const axisTitle = appendSvg(svg, "text", {
+      x: plot.x + plot.width,
+      y: plot.y - 10,
+      class: "ofv-chart-label ofv-chart-axis-title",
+      "text-anchor": "end"
+    });
+    axisTitle.textContent = secondaryAxis.title;
+  }
 
-  for (const value of axisScale.ticks) {
-    const y = plot.y + plot.height - ((value - axisMin) / (axisMax - axisMin || 1)) * plot.height;
+  for (const value of primaryScale.ticks) {
+    const y = chartValueY(value, primaryScale, plot);
     appendSvg(svg, "line", {
       x1: plot.x,
       y1: Number(y.toFixed(1)),
@@ -3946,7 +4233,20 @@ function renderChartSvg(chart: ChartPreview): SVGSVGElement {
       class: "ofv-chart-label",
       "text-anchor": "end"
     });
-    label.textContent = formatChartTick(value);
+    label.textContent = formatChartTick(value, primaryScale.formatCode);
+  }
+
+  if (secondaryScale) {
+    for (const value of secondaryScale.ticks) {
+      const y = chartValueY(value, secondaryScale, plot);
+      const label = appendSvg(svg, "text", {
+        x: plot.x + plot.width + 12,
+        y: Number((y + 4).toFixed(1)),
+        class: "ofv-chart-label ofv-chart-secondary-axis-label",
+        "text-anchor": "start"
+      });
+      label.textContent = formatChartTick(value, secondaryAxis?.formatCode);
+    }
   }
 
   appendSvg(svg, "line", {
@@ -3957,21 +4257,31 @@ function renderChartSvg(chart: ChartPreview): SVGSVGElement {
     class: "ofv-chart-axis"
   });
 
-  if (chart.type.includes("bar") || chart.type.includes("col")) {
-    const categoryCount = Math.max(1, categories.length, ...chart.series.map((series) => series.values.length));
+  const barSeries = chart.series.filter((series) => series.type.includes("bar") || series.type.includes("col"));
+  const lineSeries = chart.series.filter((series) => !barSeries.includes(series));
+  const categoryCount = Math.max(1, categories.length, ...chart.series.map((series) => series.values.length));
+  const categoryStep = categoryCount > 1 ? plot.width / (categoryCount - 1) : plot.width;
+  appendChartCategoryLabels(
+    svg,
+    categories,
+    plot,
+    (index) => barSeries.length > 0 ? plot.x + (plot.width / categoryCount) * (index + 0.5) : plot.x + index * categoryStep
+  );
+
+  if (barSeries.length > 0) {
     const groupWidth = plot.width / categoryCount;
     const clusterWidth = groupWidth * 0.58;
-    const barWidth = Math.max(5, Math.min(28, clusterWidth / Math.max(1, chart.series.length)));
-    const zeroY = plot.y + plot.height - ((0 - axisMin) / (axisMax - axisMin || 1)) * plot.height;
+    const barWidth = Math.max(5, Math.min(28, clusterWidth / Math.max(1, barSeries.length)));
 
-    appendChartCategoryLabels(svg, categories, plot, (index) => plot.x + groupWidth * (index + 0.5));
-
-    chart.series.forEach((series, seriesIndex) => {
-      const color = series.color || colors[seriesIndex % colors.length];
+    barSeries.forEach((series, seriesIndex) => {
+      const colorIndex = chart.series.indexOf(series);
+      const color = series.color || colors[colorIndex % colors.length];
+      const scale = createChartSeriesScale(chart, series);
+      const zeroY = chartValueY(Math.max(scale.min, Math.min(scale.max, 0)), scale, plot);
       series.values.forEach((value, index) => {
         const groupCenter = plot.x + groupWidth * (index + 0.5);
-        const x = groupCenter - (barWidth * chart.series.length) / 2 + seriesIndex * barWidth + barWidth * 0.12;
-        const y = plot.y + plot.height - ((value - axisMin) / (axisMax - axisMin || 1)) * plot.height;
+        const x = groupCenter - (barWidth * barSeries.length) / 2 + seriesIndex * barWidth + barWidth * 0.12;
+        const y = chartValueY(value, scale, plot);
         appendSvg(svg, "rect", {
           x: Number(x.toFixed(1)),
           y: Number(Math.min(y, zeroY).toFixed(1)),
@@ -3982,17 +4292,16 @@ function renderChartSvg(chart: ChartPreview): SVGSVGElement {
         });
       });
     });
-  } else {
-    const categoryStep = categories.length > 1 ? plot.width / (categories.length - 1) : plot.width;
-    appendChartCategoryLabels(svg, categories, plot, (index) => plot.x + index * categoryStep);
+  }
 
-    chart.series.forEach((series, seriesIndex) => {
+  lineSeries.forEach((series) => {
+      const seriesIndex = chart.series.indexOf(series);
       const color = series.color || colors[seriesIndex % colors.length];
+      const scale = createChartSeriesScale(chart, series);
       const step = series.values.length > 1 ? plot.width / (series.values.length - 1) : plot.width;
-      const lineSpan = axisMax - axisMin || span;
       const points = series.values.map((value, index) => ({
         x: plot.x + index * step,
-        y: plot.y + plot.height - ((value - axisMin) / lineSpan) * plot.height
+        y: chartValueY(value, scale, plot)
       }));
 
       appendSvg(svg, "polyline", {
@@ -4003,14 +4312,33 @@ function renderChartSvg(chart: ChartPreview): SVGSVGElement {
         "stroke-linecap": "round",
         "stroke-linejoin": "round"
       });
-      for (const point of points.slice(0, 80)) {
-        appendSvg(svg, "circle", { cx: point.x, cy: point.y, r: 3, fill: color });
-      }
-    });
-  }
+  });
 
-  appendChartLegend(svg, chart, colors, 348);
+  if (chart.showLegend) {
+    appendChartLegend(svg, chart, colors, 348);
+  }
   return svg;
+}
+
+type ChartAxisScale = { min: number; max: number; ticks: number[]; formatCode?: string };
+
+function createChartSeriesScale(
+  chart: ChartPreview,
+  series: ChartPreview["series"][number] | undefined
+): ChartAxisScale {
+  const values = series?.values.filter((value) => Number.isFinite(value)) || [];
+  const max = Math.max(1, ...values);
+  const min = Math.min(0, ...values);
+  const axis = chart.axes.find((item) => item.id === series?.valueAxisId);
+  return createChartAxisScale(max, min, axis);
+}
+
+function chartValueY(
+  value: number,
+  scale: Pick<ChartAxisScale, "min" | "max">,
+  plot: { y: number; height: number }
+): number {
+  return plot.y + plot.height - ((value - scale.min) / (scale.max - scale.min || 1)) * plot.height;
 }
 
 function appendChartCategoryLabels(
@@ -4020,10 +4348,13 @@ function appendChartCategoryLabels(
   getX: (index: number) => number
 ): void {
   const interval = Math.max(1, Math.ceil(categories.length / 14));
+  let previousLabel = "";
   categories.forEach((category, index) => {
-    if (index % interval !== 0 && index !== categories.length - 1) {
+    const duplicate = category === previousLabel;
+    if (index % interval !== 0 || duplicate) {
       return;
     }
+    previousLabel = category;
     const label = appendSvg(svg, "text", {
       x: Number(getX(index).toFixed(1)),
       y: plot.y + plot.height + 22,
@@ -4044,19 +4375,19 @@ function appendChartLegend(svg: SVGSVGElement, chart: ChartPreview, colors: stri
   });
 }
 
-function createChartAxisScale(max: number, min: number): { min: number; max: number; ticks: number[] } {
-  const axisMin = Math.min(0, min);
-  const positiveMax = Math.max(1, max);
-  const step = niceChartStep((positiveMax - axisMin) / 5);
-  let axisMax = Math.ceil(positiveMax / step) * step;
-  if (axisMax <= positiveMax) {
-    axisMax += step;
+function createChartAxisScale(max: number, min: number, axis?: ChartAxisPreview): ChartAxisScale {
+  const axisMin = axis?.min ?? Math.min(0, min);
+  const positiveMax = Math.max(axisMin, max);
+  const step = axis?.majorUnit && axis.majorUnit > 0 ? axis.majorUnit : niceChartStep((positiveMax - axisMin || 1) / 5);
+  let axisMax = axis?.max ?? Math.ceil(positiveMax / step) * step;
+  if (axisMax <= axisMin) {
+    axisMax = axisMin + step;
   }
   const ticks: number[] = [];
-  for (let value = axisMin; value <= axisMax + step / 2; value += step) {
+  for (let value = axisMin, count = 0; value <= axisMax + step / 2 && count < 50; value += step, count += 1) {
     ticks.push(Number(value.toFixed(6)));
   }
-  return { min: axisMin, max: axisMax, ticks };
+  return { min: axisMin, max: axisMax, ticks, formatCode: axis?.formatCode };
 }
 
 function niceChartStep(rawStep: number): number {
@@ -4069,7 +4400,10 @@ function niceChartStep(rawStep: number): number {
   return nice * magnitude;
 }
 
-function formatChartTick(value: number): string {
+function formatChartTick(value: number, formatCode?: string): string {
+  if (formatCode?.includes("%")) {
+    return `${Number((value * 100).toFixed(1))}%`;
+  }
   const rounded = Math.abs(value) < 1 ? Number(value.toFixed(1)) : Number(value.toFixed(0));
   return String(rounded);
 }
@@ -4100,14 +4434,6 @@ function appendSvg<K extends keyof SVGElementTagNameMap>(
 function textFromFirst(root: ParentNode, localName: string): string {
   const element = Array.from(root.querySelectorAll("*")).find((item) => item.localName === localName);
   return element ? chartText(element) : "";
-}
-
-function stringsFromFirst(root: ParentNode, localName: string): string[] {
-  const element = Array.from(root.querySelectorAll("*")).find((item) => item.localName === localName);
-  if (!element) {
-    return [];
-  }
-  return chartStringValues(element);
 }
 
 function numbersFromFirst(root: ParentNode, localName: string): number[] {
@@ -4367,6 +4693,7 @@ function createWorkbookSheetTable(
   const rowStart = range.s.r + viewport.rowStart;
   const mergePlan = createSheetMergePlan(sheet["!merges"] || [], rowStart, rowEnd, columnStart, columnEnd);
   const imagesByCell = groupWorkbookImagesByCell(images);
+  const columnsWithResizeHandles = new Set<number>();
 
   const colGroup = document.createElement("colgroup");
   let tableWidth = 0;
@@ -4442,8 +4769,10 @@ function createWorkbookSheetTable(
         cell.classList.add("ofv-cell-multiline");
       }
       appendWorkbookCellImages(cell, imagesByCell.get(`${rowIndex}:${columnIndex}`), text);
-      if (rowIndex === rowStart) {
-        appendColumnResizeHandle(cell, columnIndex, columnSizing);
+      const resizeColumnIndex = columnIndex + (merge?.colspan || 1) - 1;
+      if (!columnsWithResizeHandles.has(resizeColumnIndex)) {
+        appendColumnResizeHandle(cell, resizeColumnIndex, columnSizing);
+        columnsWithResizeHandles.add(resizeColumnIndex);
       }
       row.append(cell);
     }
@@ -4475,6 +4804,7 @@ function appendColumnResizeHandle(
 ): void {
   const handle = document.createElement("span");
   handle.className = "ofv-column-resize-handle";
+  handle.dataset.columnIndex = String(columnIndex);
   handle.setAttribute("aria-hidden", "true");
   handle.addEventListener("pointerdown", (event) => {
     event.preventDefault();
@@ -5089,6 +5419,7 @@ async function renderPptx(panel: HTMLElement, arrayBuffer: ArrayBuffer): Promise
   let insight: PresentationInsight | undefined;
   let zip: JSZip | undefined;
   let placeholderFontCorrections: PptxPlaceholderFontCorrection[] = [];
+  let autofitLineHeightCorrections: PptxAutofitLineHeightCorrection[] = [];
 
   try {
     zip = await JSZip.loadAsync(arrayBuffer);
@@ -5103,13 +5434,18 @@ async function renderPptx(panel: HTMLElement, arrayBuffer: ArrayBuffer): Promise
     } catch (error) {
       console.warn("PPTX placeholder font extraction failed:", error);
     }
+    try {
+      autofitLineHeightCorrections = await inspectPptxAutofitLineHeightCorrections(zip);
+    } catch (error) {
+      console.warn("PPTX autofit line-height extraction failed:", error);
+    }
   }
 
   panel.append(container);
   try {
     const { PptxViewer } = await import("@aiden0z/pptx-renderer");
     await withTimeout(PptxViewer.open(arrayBuffer, container), pptxRenderTimeoutMs());
-    schedulePptxLayoutNormalization(container, placeholderFontCorrections);
+    schedulePptxLayoutNormalization(container, placeholderFontCorrections, autofitLineHeightCorrections);
   } catch (error) {
     container.replaceChildren();
     if (insight) {
@@ -5168,16 +5504,27 @@ function pptxRenderTimeoutMs(): number {
   return typeof override === "number" && override > 0 ? override : DEFAULT_PPTX_RENDER_TIMEOUT_MS;
 }
 
-type PptxPlaceholderFontCorrection = {
+type PptxShapeGeometry = {
   slideIndex: number;
   leftRatio: number;
   topRatio: number;
   widthRatio: number;
   heightRatio: number;
+};
+
+type PptxPlaceholderFontCorrection = PptxShapeGeometry & {
   fontSizePt: number;
 };
 
-function normalizePptxLayout(container: HTMLElement, placeholderFontCorrections: PptxPlaceholderFontCorrection[]): void {
+type PptxAutofitLineHeightCorrection = PptxShapeGeometry & {
+  paragraphs: string[];
+};
+
+function normalizePptxLayout(
+  container: HTMLElement,
+  placeholderFontCorrections: PptxPlaceholderFontCorrection[],
+  autofitLineHeightCorrections: PptxAutofitLineHeightCorrection[]
+): void {
   const slideCanvases = findPptxSlideCanvases(container);
   for (const slide of slideCanvases) {
     if (!hasInlineBackground(slide)) {
@@ -5185,6 +5532,7 @@ function normalizePptxLayout(container: HTMLElement, placeholderFontCorrections:
     }
   }
   normalizePptxPlaceholderFonts(container, placeholderFontCorrections);
+  normalizePptxAutofitLineHeights(container, autofitLineHeightCorrections);
   normalizePptxCircleCalloutText(container);
   normalizePptxDiagramCycleText(container);
   normalizePptxMirroredText(container);
@@ -5192,18 +5540,21 @@ function normalizePptxLayout(container: HTMLElement, placeholderFontCorrections:
 
 function schedulePptxLayoutNormalization(
   container: HTMLElement,
-  placeholderFontCorrections: PptxPlaceholderFontCorrection[]
+  placeholderFontCorrections: PptxPlaceholderFontCorrection[],
+  autofitLineHeightCorrections: PptxAutofitLineHeightCorrection[]
 ): void {
-  normalizePptxLayout(container, placeholderFontCorrections);
+  normalizePptxLayout(container, placeholderFontCorrections, autofitLineHeightCorrections);
   let observer: MutationObserver | undefined;
   if (typeof MutationObserver !== "undefined") {
-    observer = new MutationObserver(() => normalizePptxLayout(container, placeholderFontCorrections));
+    observer = new MutationObserver(() =>
+      normalizePptxLayout(container, placeholderFontCorrections, autofitLineHeightCorrections)
+    );
     observer.observe(container, { childList: true, subtree: true });
   }
   for (const delay of [0, 100, 500, 1500, 3000]) {
     window.setTimeout(() => {
       if (container.isConnected) {
-        normalizePptxLayout(container, placeholderFontCorrections);
+        normalizePptxLayout(container, placeholderFontCorrections, autofitLineHeightCorrections);
       }
     }, delay);
   }
@@ -5447,6 +5798,68 @@ async function inspectPptxPlaceholderFontCorrections(zip: JSZip): Promise<PptxPl
   return corrections;
 }
 
+async function inspectPptxAutofitLineHeightCorrections(
+  zip: JSZip
+): Promise<PptxAutofitLineHeightCorrection[]> {
+  const presentationXml = await zip.file("ppt/presentation.xml")?.async("text");
+  const presentation = presentationXml ? parseOfficeXml(presentationXml) : undefined;
+  const slideSize = presentation
+    ? Array.from(presentation.getElementsByTagName("*")).find((element) => element.localName === "sldSz")
+    : undefined;
+  const slideWidth = Number(slideSize?.getAttribute("cx"));
+  const slideHeight = Number(slideSize?.getAttribute("cy"));
+  if (!(slideWidth > 0) || !(slideHeight > 0)) {
+    return [];
+  }
+
+  const slideEntries = Object.values(zip.files)
+    .filter((entry) => !entry.dir && /^ppt\/slides\/slide\d+\.xml$/i.test(entry.name))
+    .sort((a, b) => slideNumberFromPath(a.name) - slideNumberFromPath(b.name));
+  const corrections: PptxAutofitLineHeightCorrection[] = [];
+
+  for (const [slideIndex, entry] of slideEntries.entries()) {
+    const slide = parseOfficeXml(await entry.async("text"));
+    if (!slide) {
+      continue;
+    }
+    const shapes = Array.from(slide.getElementsByTagName("*")).filter((element) => element.localName === "sp");
+    for (const shape of shapes) {
+      const textBody = findPptxDescendant(shape, "txBody");
+      const bodyProperties = textBody ? findPptxChild(textBody, "bodyPr") : undefined;
+      if (!textBody || !bodyProperties || !findPptxChild(bodyProperties, "normAutofit")) {
+        continue;
+      }
+      const paragraphs = Array.from(textBody.children).filter((element) => element.localName === "p");
+      const defaultLineHeightParagraphs = paragraphs
+        .filter((paragraph) => !findPptxDescendant(paragraph, "lnSpc"))
+        .map((paragraph) => normalizePptxParagraphText(paragraph.textContent || ""))
+        .filter(Boolean);
+      if (defaultLineHeightParagraphs.length === 0) {
+        continue;
+      }
+      const transform = findPptxDescendant(shape, "xfrm");
+      const offset = transform ? findPptxChild(transform, "off") : undefined;
+      const extent = transform ? findPptxChild(transform, "ext") : undefined;
+      const left = Number(offset?.getAttribute("x"));
+      const top = Number(offset?.getAttribute("y"));
+      const width = Number(extent?.getAttribute("cx"));
+      const height = Number(extent?.getAttribute("cy"));
+      if (![left, top, width, height].every((value) => Number.isFinite(value)) || width <= 0 || height <= 0) {
+        continue;
+      }
+      corrections.push({
+        slideIndex,
+        leftRatio: left / slideWidth,
+        topRatio: top / slideHeight,
+        widthRatio: width / slideWidth,
+        heightRatio: height / slideHeight,
+        paragraphs: defaultLineHeightParagraphs
+      });
+    }
+  }
+  return corrections;
+}
+
 function readPptxLayoutPlaceholderFontSizes(layout: Document): Map<string, number> {
   const result = new Map<string, number>();
   const shapes = Array.from(layout.getElementsByTagName("*")).filter((element) => element.localName === "sp");
@@ -5494,7 +5907,7 @@ function normalizePptxPlaceholderFonts(
     if (!wrapper) {
       continue;
     }
-    const match = findPptxPlaceholderElement(wrapper, correction);
+    const match = findPptxShapeElement(wrapper, correction);
     if (!match) {
       continue;
     }
@@ -5510,9 +5923,45 @@ function normalizePptxPlaceholderFonts(
   }
 }
 
-function findPptxPlaceholderElement(
+function normalizePptxAutofitLineHeights(
+  container: HTMLElement,
+  corrections: PptxAutofitLineHeightCorrection[]
+): void {
+  for (const correction of corrections) {
+    const wrapper = container.querySelector<HTMLElement>(`div[data-slide-index="${correction.slideIndex}"]`);
+    if (!wrapper) {
+      continue;
+    }
+    const match = findPptxShapeElement(wrapper, correction);
+    if (!match) {
+      continue;
+    }
+    const paragraphElements = Array.from(match.querySelectorAll<HTMLElement>("div")).filter((element) => {
+      const directChildren = Array.from(element.children);
+      return directChildren.length > 0 && directChildren.every((child) => child.tagName === "SPAN");
+    });
+    const unused = new Set(paragraphElements);
+    for (const paragraph of correction.paragraphs) {
+      const element = Array.from(unused).find((candidate) =>
+        normalizePptxParagraphText(candidate.textContent || "").endsWith(paragraph)
+      );
+      if (!element) {
+        continue;
+      }
+      element.style.lineHeight = "1";
+      element.dataset.ofvPptxDefaultLineHeight = "true";
+      unused.delete(element);
+    }
+  }
+}
+
+function normalizePptxParagraphText(value: string): string {
+  return value.replace(/\s+/g, "").trim();
+}
+
+function findPptxShapeElement(
   wrapper: HTMLElement,
-  correction: PptxPlaceholderFontCorrection
+  correction: PptxShapeGeometry
 ): HTMLElement | undefined {
   let best: { element: HTMLElement; score: number } | undefined;
   for (const canvas of findPptxSlideCanvases(wrapper)) {
