@@ -1430,6 +1430,7 @@ async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuf
   repairDocxFloatingShapeTextboxes(container, hints.floatingShapes);
   repairDocxChartPlaceholders(container, charts);
   repairDocxComplexScriptFontSizes(container, hints.complexScriptFontSizeParagraphs);
+  repairDocxCharacterScaling(container, hints.characterScaleParagraphs);
   const pages = container.querySelectorAll<HTMLElement>("section.ofv-docx");
   for (const page of pages) {
     repairDocxShapeFills(page);
@@ -1723,6 +1724,10 @@ type DocxLayoutHints = {
     text: string;
     fontSizePt: number;
   }>;
+  characterScaleParagraphs: Array<{
+    text: string;
+    scalePercent: number;
+  }>;
   hasVerticalTextDirection: boolean;
 };
 
@@ -1751,6 +1756,7 @@ async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayout
       rightTabParagraphs: documentXml ? extractDocxRightTabParagraphHints(documentXml) : [],
       pageNumberFieldResults: footerXmls.flatMap(extractDocxPageNumberFieldResults),
       complexScriptFontSizeParagraphs: documentXml ? extractDocxComplexScriptFontSizeHints(documentXml) : [],
+      characterScaleParagraphs: documentXml ? extractDocxCharacterScaleHints(documentXml) : [],
       hasVerticalTextDirection: Boolean(documentXml && /<w:textDirection\b/.test(documentXml))
     };
   } catch {
@@ -1761,6 +1767,7 @@ async function readDocxLayoutHints(arrayBuffer: ArrayBuffer): Promise<DocxLayout
       rightTabParagraphs: [],
       pageNumberFieldResults: [],
       complexScriptFontSizeParagraphs: [],
+      characterScaleParagraphs: [],
       hasVerticalTextDirection: false
     };
   }
@@ -1899,6 +1906,119 @@ function repairDocxComplexScriptFontSizes(
     if (paragraph) {
       paragraph.style.fontSize = `${formatCssNumber(hint.fontSizePt)}pt`;
     }
+  }
+}
+
+/**
+ * DOCX stores condensed character spacing as w:rPr/w:w (in percent). The
+ * browser renderer currently ignores this property, which can make a title
+ * wrap even though Word/WPS keeps it on one line. Keep the paragraph's normal
+ * flow width while applying the same horizontal scale to its rendered text.
+ */
+function extractDocxCharacterScaleHints(xml: string): DocxLayoutHints["characterScaleParagraphs"] {
+  const document = parseOfficeXml(xml);
+  if (!document) {
+    return [];
+  }
+  return Array.from(document.getElementsByTagName("*"))
+    .filter((element) => element.localName === "p")
+    .map((paragraph) => {
+      const runs = Array.from(paragraph.getElementsByTagName("*")).filter((element) => element.localName === "r");
+      if (runs.length === 0) {
+        return undefined;
+      }
+      const runScales = runs.map((run) => {
+        const runProperties = Array.from(run.children).find((child) => child.localName === "rPr");
+        const width = runProperties
+          ? Array.from(runProperties.children).find((child) => child.localName === "w")
+          : undefined;
+        const scalePercent = Number(width ? getXmlAttribute(width, "val") : 0);
+        const text = normalizePreviewText(
+          Array.from(run.getElementsByTagName("*"))
+            .filter((child) => child.localName === "t")
+            .map((child) => child.textContent || "")
+            .join("")
+        );
+        return { text, scalePercent };
+      });
+      const text = normalizePreviewText(runScales.map((run) => run.text).join(""));
+      const scales = runScales.filter((run) => run.text).map((run) => run.scalePercent);
+      const uniqueScales = [...new Set(scales)];
+      return text && uniqueScales.length === 1 && uniqueScales[0]! > 0 && uniqueScales[0]! < 100
+        ? { text, scalePercent: uniqueScales[0]! }
+        : undefined;
+    })
+    .filter((hint): hint is DocxLayoutHints["characterScaleParagraphs"][number] => Boolean(hint));
+}
+
+function repairDocxCharacterScaling(
+  container: HTMLElement,
+  hints: DocxLayoutHints["characterScaleParagraphs"]
+): void {
+  if (hints.length === 0) {
+    return;
+  }
+  const candidatesByText = new Map<string, HTMLParagraphElement[]>();
+  for (const paragraph of container.querySelectorAll<HTMLParagraphElement>("section.ofv-docx p")) {
+    const text = normalizePreviewText(paragraph.textContent || "");
+    if (!text) {
+      continue;
+    }
+    const candidates = candidatesByText.get(text) || [];
+    candidates.push(paragraph);
+    candidatesByText.set(text, candidates);
+  }
+  for (const hint of hints) {
+    const paragraph = candidatesByText.get(hint.text)?.shift();
+    if (!paragraph || paragraph.dataset.ofvDocxCharacterScaled === "true") {
+      continue;
+    }
+    // Do not wrap drawings/tables in a transform; their geometry is handled by
+    // the floating/layout repair passes below.
+    if (paragraph.querySelector("img, svg, table")) {
+      continue;
+    }
+    const scale = hint.scalePercent / 100;
+    const align = paragraph.style.textAlign || getComputedStyle(paragraph).textAlign;
+    const lineWrapper = document.createElement("span");
+    lineWrapper.className = "ofv-docx-character-scale-line";
+    lineWrapper.style.display = "block";
+    lineWrapper.style.width = "100%";
+    lineWrapper.style.whiteSpace = "nowrap";
+    lineWrapper.style.textAlign = align;
+    const textWrapper = document.createElement("span");
+    textWrapper.className = "ofv-docx-character-scale";
+    textWrapper.style.display = "inline-block";
+    textWrapper.style.whiteSpace = "nowrap";
+    textWrapper.style.transform = `scaleX(${formatCssNumber(scale)})`;
+    textWrapper.style.transformOrigin = "left center";
+    while (paragraph.firstChild) {
+      textWrapper.append(paragraph.firstChild);
+    }
+    // docx-preview marks text runs as `pre-wrap`; that allows each run to
+    // wrap independently before the parent transform is applied. Override it
+    // for every textual descendant so the condensed line behaves as one run.
+    for (const descendant of textWrapper.querySelectorAll<HTMLElement>("*")) {
+      if (!descendant.querySelector("img, svg, table")) {
+        descendant.style.whiteSpace = "nowrap";
+      }
+    }
+    lineWrapper.append(textWrapper);
+    paragraph.append(lineWrapper);
+    // An inline transformed box keeps its unscaled line-box width. Offset the
+    // visual box by the amount removed by scaleX so right/center alignment
+    // remains inside the paragraph instead of overflowing the page.
+    const unscaledWidth = textWrapper.offsetWidth;
+    const visualOffset = unscaledWidth * (1 - scale);
+    if (align === "right") {
+      textWrapper.style.position = "relative";
+      textWrapper.style.left = `${formatCssNumber(visualOffset)}px`;
+    } else if (align === "center") {
+      textWrapper.style.position = "relative";
+      textWrapper.style.left = `${formatCssNumber(visualOffset / 2)}px`;
+    }
+    paragraph.style.whiteSpace = "nowrap";
+    paragraph.dataset.ofvDocxCharacterScaled = "true";
   }
 }
 
@@ -2293,7 +2413,13 @@ function repairDocxFloatingPicturesAcrossPages(container: HTMLElement, hints: Do
   if (candidates.length !== pictureHints.length) {
     return;
   }
-  candidates.forEach(({ image, page }, index) => repairDocxFloatingPicture(page, image, pictureHints[index]!));
+  candidates.forEach(({ image, page }, index) => {
+    // DrawingML positions body anchors relative to the text column. The
+    // renderer's page coordinates start at the paper edge, so include the
+    // page's left text margin when translating the anchor into CSS.
+    const pagePaddingLeft = parseCssPixelValue(page.style.paddingLeft || page.style.padding) || 0;
+    repairDocxFloatingPicture(page, image, pictureHints[index]!, pagePaddingLeft);
+  });
 }
 
 function isDocxFloatingPictureCandidate(image: HTMLImageElement): boolean {
@@ -2652,8 +2778,10 @@ function repairDocxFirstPageClosingDate(container: HTMLElement): void {
   article.append(dateParagraph);
   firstPage.style.position = firstPage.style.position || "relative";
   dateParagraph.style.position = "absolute";
-  dateParagraph.style.left = "0pt";
-  dateParagraph.style.right = "0pt";
+  const pagePaddingLeft = parseCssLengthInPoints(firstPage.style.paddingLeft || firstPage.style.padding);
+  const pagePaddingRight = parseCssLengthInPoints(firstPage.style.paddingRight || firstPage.style.padding);
+  dateParagraph.style.left = `${formatCssNumber(pagePaddingLeft)}pt`;
+  dateParagraph.style.right = `${formatCssNumber(pagePaddingRight)}pt`;
   dateParagraph.style.marginTop = "0pt";
   dateParagraph.style.top = `${formatCssNumber(signatoryBottom + marginTop)}pt`;
   dateParagraph.dataset.ofvDocxClosingDateRepaired = "true";

@@ -1152,6 +1152,52 @@ describe("officePlugin", () => {
     expect(paragraphs[1]?.style.fontSize).toBe("");
   });
 
+  it("preserves condensed DOCX title text on one line like WPS", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.style.width = "595.3pt";
+      page.style.height = "800pt";
+      const article = document.createElement("article");
+      article.className = "ofv-docx-document";
+      const paragraph = document.createElement("p");
+      paragraph.style.textAlign = "right";
+      paragraph.textContent = "中共玉门市委办公室文件";
+      article.append(paragraph);
+      page.append(article);
+      wrapper.append(page);
+      bodyContainer.append(wrapper);
+    });
+    const zip = new JSZip();
+    zip.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:r><w:rPr><w:w w:val="55"/></w:rPr><w:t>中共玉门市委办公室文件</w:t></w:r></w:p>
+      </w:body></w:document>`
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
+      fileName: "condensed-title.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector("[data-ofv-docx-character-scaled='true']")));
+
+    const paragraph = container.querySelector<HTMLParagraphElement>("section.ofv-docx p");
+    const scaled = paragraph?.querySelector<HTMLElement>(".ofv-docx-character-scale");
+    expect(paragraph?.style.whiteSpace).toBe("nowrap");
+    expect(scaled?.style.transform).toBe("scaleX(0.55)");
+    expect(scaled?.style.transformOrigin).toBe("left center");
+  });
+
   it("aligns right-tab DOCX text to the OOXML tab position", async () => {
     renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
       const wrapper = document.createElement("div");
@@ -2262,7 +2308,7 @@ describe("officePlugin", () => {
     expect(imageWrapper.dataset.ofvDocxFloatRepaired).toBe("true");
     expect(imageWrapper.style.position).toBe("absolute");
     expect(imageWrapper.style.float).toBe("none");
-    expect(imageWrapper.style.left).toBe("454.35pt");
+    expect(imageWrapper.style.left).toBe("490.35pt");
     expect(imageWrapper.style.width).toBe("68pt");
   });
 
@@ -2299,9 +2345,9 @@ describe("officePlugin", () => {
     expect(imageWrappers).toHaveLength(2);
     expect(imageWrappers[0].dataset.ofvDocxFloatRepaired).toBe("true");
     expect(imageWrappers[1].dataset.ofvDocxFloatRepaired).toBe("true");
-    expect(imageWrappers[0].style.left).toBe("72pt");
+    expect(imageWrappers[0].style.left).toBe("108pt");
     expect(imageWrappers[0].style.width).toBe("36pt");
-    expect(imageWrappers[1].style.left).toBe("180pt");
+    expect(imageWrappers[1].style.left).toBe("216pt");
     expect(imageWrappers[1].style.width).toBe("48pt");
   });
 
@@ -2339,8 +2385,8 @@ describe("officePlugin", () => {
 
     const repaired = Array.from(container.querySelectorAll<HTMLElement>("[data-ofv-docx-float-repaired='true']"));
     expect(repaired).toHaveLength(2);
-    expect(repaired[0]?.style.left).toBe("72pt");
-    expect(repaired[1]?.style.left).toBe("180pt");
+    expect(repaired[0]?.style.left).toBe("108pt");
+    expect(repaired[1]?.style.left).toBe("216pt");
     expect(container.querySelector("img[src*='BANNER']")?.parentElement?.dataset.ofvDocxFloatRepaired).toBeUndefined();
   });
 
