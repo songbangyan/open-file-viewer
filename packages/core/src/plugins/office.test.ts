@@ -1451,6 +1451,90 @@ describe("officePlugin", () => {
     expect(pages.map((page) => page.querySelector("footer")?.textContent)).toEqual(["-2-", "-3-", "-4-"]);
   });
 
+  it("removes an empty continuation page after restoring the closing date to the cover", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+
+      const cover = document.createElement("section");
+      cover.className = "ofv-docx";
+      cover.style.width = "595.3pt";
+      cover.style.height = "800pt";
+      cover.style.padding = "36pt";
+      cover.innerHTML = `<article><p>中共玉门市委办公室</p></article><footer><p>—1—</p></footer>`;
+
+      const emptyContinuation = document.createElement("section");
+      emptyContinuation.className = "ofv-docx";
+      emptyContinuation.dataset.ofvDocxFlowContinuation = "true";
+      emptyContinuation.style.width = "595.3pt";
+      emptyContinuation.style.height = "800pt";
+      emptyContinuation.style.padding = "36pt";
+      emptyContinuation.innerHTML = `<article><p>2 0 2 5 年 7 月 7 日</p></article><footer><p>—1—</p></footer>`;
+
+      const bodyPage = document.createElement("section");
+      bodyPage.className = "ofv-docx";
+      bodyPage.style.width = "595.3pt";
+      bodyPage.style.height = "800pt";
+      bodyPage.style.padding = "36pt";
+      bodyPage.innerHTML = `<article><p>玉门市党政机关差旅费管理办法</p></article><footer><p>—2—</p></footer>`;
+
+      wrapper.append(cover, emptyContinuation, bodyPage);
+      bodyContainer.append(wrapper);
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: await createMinimalDocx(),
+      fileName: "closing-date-empty-continuation.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("section.ofv-docx").length === 2);
+    const pages = Array.from(container.querySelectorAll<HTMLElement>("section.ofv-docx"));
+    expect(pages[0]?.querySelector("article")?.textContent).toContain("中共玉门市委办公室");
+    expect(pages[0]?.querySelector("article")?.textContent).toContain("2 0 2 5 年 7 月 7 日");
+    expect(pages[1]?.querySelector("article")?.textContent).toContain("玉门市党政机关差旅费管理办法");
+    expect(pages.map((page) => page.querySelector("footer")?.textContent)).toEqual(["—1—", "—2—"]);
+  });
+
+  it("preserves a continuation page that still contains meaningful content", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const cover = document.createElement("section");
+      cover.className = "ofv-docx";
+      cover.style.width = "595.3pt";
+      cover.style.height = "800pt";
+      cover.style.padding = "36pt";
+      cover.innerHTML = `<article><p>中共玉门市委办公室</p></article>`;
+      const continuation = document.createElement("section");
+      continuation.className = "ofv-docx";
+      continuation.dataset.ofvDocxFlowContinuation = "true";
+      continuation.style.width = "595.3pt";
+      continuation.style.height = "800pt";
+      continuation.style.padding = "36pt";
+      continuation.innerHTML = `<article><p>2 0 2 5 年 7 月 7 日</p><p>附注内容</p></article>`;
+      wrapper.append(cover, continuation);
+      bodyContainer.append(wrapper);
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: await createMinimalDocx(),
+      fileName: "closing-date-nonempty-continuation.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("section.ofv-docx").length === 2);
+    const pages = Array.from(container.querySelectorAll<HTMLElement>("section.ofv-docx"));
+    expect(pages[0]?.querySelector("article")?.textContent).toContain("2 0 2 5 年 7 月 7 日");
+    expect(pages[1]?.querySelector("article")?.textContent).toContain("附注内容");
+  });
+
   it("moves a short overflowing DOCX paragraph to the next page without splitting it", async () => {
     renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
       const wrapper = document.createElement("div");
@@ -2221,6 +2305,45 @@ describe("officePlugin", () => {
     expect(imageWrappers[1].style.width).toBe("48pt");
   });
 
+  it("repairs wrapNone pictures without mistaking inline images for seals", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "ofv-docx-wrapper";
+      const page = document.createElement("section");
+      page.className = "ofv-docx";
+      page.style.width = "595.3pt";
+      page.style.padding = "36pt";
+      page.innerHTML = `
+        <p><span><div style="display:inline-block;position:relative;width:439pt;height:9pt"><img src="data:image/png;base64,BANNER" /></div></span></p>
+        <p><span><div style="display:block;position:relative;width:0;height:0;left:87pt;top:9pt"><img src="data:image/png;base64,AA==" /></div></span></p>
+      `;
+      const secondPage = document.createElement("section");
+      secondPage.className = "ofv-docx";
+      secondPage.style.width = "595.3pt";
+      secondPage.style.padding = "36pt";
+      secondPage.innerHTML = `<p><span><div style="display:block;position:relative;width:0;height:0;left:249pt;top:-47pt"><img src="data:image/png;base64,BB==" /></div></span></p>`;
+      wrapper.append(page, secondPage);
+      bodyContainer.append(wrapper);
+    });
+
+    createViewer({
+      container,
+      file: await createMultipleFloatingPicturesDocx("none"),
+      fileName: "wrap-none-pictures.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => container.querySelectorAll("[data-ofv-docx-float-repaired='true']").length === 2);
+
+    const repaired = Array.from(container.querySelectorAll<HTMLElement>("[data-ofv-docx-float-repaired='true']"));
+    expect(repaired).toHaveLength(2);
+    expect(repaired[0]?.style.left).toBe("72pt");
+    expect(repaired[1]?.style.left).toBe("180pt");
+    expect(container.querySelector("img[src*='BANNER']")?.parentElement?.dataset.ofvDocxFloatRepaired).toBeUndefined();
+  });
+
   it("restores nested floating textbox content and positions header images from their OOXML anchors", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -2238,6 +2361,9 @@ describe("officePlugin", () => {
         <article>
           <p><span><svg width="0" height="0" style="position:absolute;left:0pt;margin-left:-16.45pt;margin-top:131.05pt;height:50.7pt;width:449.4pt"><image width="100%" height="100%"><foreignObject width="100%" height="100%"><p>Floating textbox title should remain visible</p></foreignObject></image></svg></span></p>
         </article>`;
+      const headerParagraph = page.querySelector("header p")!;
+      const headerImageWrapper = page.querySelector("header img")!.parentElement!;
+      headerParagraph.append(headerImageWrapper, document.createTextNode("宏观周报"));
       wrapper.append(page);
       bodyContainer.append(wrapper);
     });
@@ -2263,6 +2389,8 @@ describe("officePlugin", () => {
     expect(headerImageWrapper.style.left).toBe("90.4pt");
     expect(headerImageWrapper.style.top).toBe("35.65pt");
     expect(headerImageWrapper.style.width).toBe("49.95pt");
+    expect(headerImageWrapper.closest("p")?.style.paddingLeft).toBe("50.35pt");
+    expect(headerImageWrapper.closest("p")?.style.minHeight).toBe("31.65pt");
   });
 
   it("aligns a DOCX cover title background and paired floating text panels", async () => {
@@ -3188,7 +3316,7 @@ async function createFloatingShapeDocx(): Promise<Blob> {
   });
 }
 
-async function createMultipleFloatingPicturesDocx(): Promise<Blob> {
+async function createMultipleFloatingPicturesDocx(wrap: "square" | "none" = "square"): Promise<Blob> {
   const zip = new JSZip();
   const pictureAnchor = (relationshipId: string, offsetX: number, width: number, height: number) => `
     <w:p>
@@ -3198,7 +3326,7 @@ async function createMultipleFloatingPicturesDocx(): Promise<Blob> {
             <wp:positionH relativeFrom="column"><wp:posOffset>${Math.round(offsetX * 12700)}</wp:posOffset></wp:positionH>
             <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
             <wp:extent cx="${Math.round(width * 12700)}" cy="${Math.round(height * 12700)}"/>
-            <wp:wrapSquare wrapText="bothSides"/>
+            ${wrap === "square" ? '<wp:wrapSquare wrapText="bothSides"/>' : "<wp:wrapNone/>"}
             <a:graphic>
               <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
                 <pic:pic><pic:blipFill><a:blip r:embed="${relationshipId}"/></pic:blipFill></pic:pic>

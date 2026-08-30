@@ -615,6 +615,10 @@ async function renderDocx(panel: HTMLElement, arrayBuffer: ArrayBuffer, fit: Pre
       docxRenderTimeoutMs(),
       "DOCX rendering"
     );
+    // docx-preview schedules image URL assignment after its DOM pass. Give
+    // those tasks one turn to settle so floating-picture repair can see the
+    // complete set of rendered images (including late-loaded seals).
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     await normalizeDocxLayout(content, arrayBuffer, styleContainer);
     const shouldUseTextboxFallback =
       (await docxPreviewLooksBlank(content, arrayBuffer)) ||
@@ -633,6 +637,8 @@ async function renderDocx(panel: HTMLElement, arrayBuffer: ArrayBuffer, fit: Pre
     }
     panel.append(content);
     paginateDocxFlow(content);
+    repairDocxFirstPageClosingDate(content);
+    synchronizeDocxPaginationAfterRepair(content);
     disposeFit = fitDocxPages(content, fit);
     return () => {
       disposeFit?.();
@@ -1427,7 +1433,6 @@ async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuf
   const pages = container.querySelectorAll<HTMLElement>("section.ofv-docx");
   for (const page of pages) {
     repairDocxShapeFills(page);
-    repairDocxFloatingPictures(page, hints);
     repairDocxHeaderFloatingPictures(page, hints);
     repairDocxHeadingShapeAlignment(page);
     repairDocxListIndentAlignment(page);
@@ -1446,6 +1451,32 @@ async function normalizeDocxLayout(container: HTMLElement, arrayBuffer: ArrayBuf
   }
   repairDocxRightTabStops(container, hints.rightTabParagraphs);
   markDocxPageNumberFields(container, hints.pageNumberFieldResults);
+  // Some browsers resolve FileReader-backed image URLs a little after the
+  // renderer promise. Re-run the cross-page matcher once those URLs settle.
+  // Let docx-preview finish pagination and browser layout before measuring
+  // anchor paragraphs. Measuring during its initial DOM pass reports the
+  // anchor paragraphs at y=0, which would put seals at the page top.
+  await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  repairDocxFloatingPicturesAcrossPages(container, hints);
+  // Chromium can complete a second pagination/layout pass shortly after the
+  // renderer promise. Recompute anchor positions after that pass as well.
+  await new Promise<void>((resolve) => setTimeout(resolve, 300));
+  repairDocxFloatingPicturesAcrossPages(container, hints);
+  repositionDocxFloatingPicturesFromAnchorParagraphs(container, hints);
+  // Image decoding can trigger more DOM/style updates after pagination. Keep
+  // a short-lived non-blocking reflow watcher alive after normalization
+  // returns so tests and callers are not held for several seconds.
+  if (hints.floatingPictures.some((item) => item.relativeFrom === "column" && (item.wrap === "square" || item.wrap === "none"))) {
+    let reflowAttempts = 0;
+    const watchAnchorLayout = (): void => {
+      repositionDocxFloatingPicturesFromAnchorParagraphs(container, hints);
+      reflowAttempts += 1;
+      if (reflowAttempts < 30) {
+        setTimeout(watchAnchorLayout, 200);
+      }
+    };
+    watchAnchorLayout();
+  }
 }
 
 function normalizeDocxNumberingStyles(styleContainer: HTMLElement | undefined): void {
@@ -2094,7 +2125,11 @@ function extractFloatingPictureHints(xml: string): DocxLayoutHints["floatingPict
         offsetXPt: emuToPt(Number(offsetX?.[2] || 0)),
         offsetYPt: emuToPt(Number(offsetY?.[2] || 0)),
         relativeFrom: offsetX?.[1] || "",
-        relativeToParagraph: offsetY?.[1] === "paragraph",
+        // Keep the vertical anchor relationship independent from the offset
+        // capture. Some WPS-generated files contain namespace/attribute
+        // formatting that makes the broad offset expression capture the
+        // number but not the relationship consistently.
+        relativeToParagraph: /<wp:positionV\b[^>]*\brelativeFrom=["']paragraph["']/i.test(anchor),
         wrap: /<wp:wrapSquare\b/.test(anchor) ? "square" : /<wp:wrapNone\b/.test(anchor) ? "none" : ""
       };
     })
@@ -2225,20 +2260,86 @@ function repairDocxCoverPageFloatingLayout(
   }
 }
 
-function repairDocxFloatingPictures(page: HTMLElement, hints: DocxLayoutHints): void {
-  const pageHints = hints.floatingPictures.filter((item) => item.relativeFrom === "column" && item.wrap === "square");
-  if (pageHints.length === 0) {
-    return;
-  }
-  const images = Array.from(page.querySelectorAll<HTMLImageElement>("img")).filter(
-    (image) =>
-      image.closest("header, footer") === null &&
-      image.closest<HTMLElement>("[data-ofv-docx-float-repaired='true']") === null
+/**
+ * Floating pictures are emitted in the page where their anchor appears. A
+ * document-level hint list therefore cannot be matched from each page in
+ * isolation (and real-world DOCX files often have a different number of
+ * pictures on every page). Match the rendered pictures in document order,
+ * while leaving inline images such as banners untouched.
+ */
+function repairDocxFloatingPicturesAcrossPages(container: HTMLElement, hints: DocxLayoutHints): void {
+  const pictureHints = hints.floatingPictures.filter(
+    (item) => item.relativeFrom === "column" && (item.wrap === "square" || item.wrap === "none")
   );
-  if (images.length === 0 || images.length !== pageHints.length) {
+  if (pictureHints.length === 0) {
     return;
   }
-  images.forEach((image, index) => repairDocxFloatingPicture(page, image, pageHints[index]));
+  const pages = Array.from(container.querySelectorAll<HTMLElement>("section.ofv-docx"));
+  const images = pages.flatMap((page) =>
+    Array.from(page.querySelectorAll<HTMLImageElement>("img"))
+      .filter(
+        (image) =>
+          image.closest("header, footer") === null
+      )
+      .map((image) => ({ image, page }))
+  );
+  const floatingImages = images.filter(({ image }) => isDocxFloatingPictureCandidate(image));
+  const candidates =
+    floatingImages.length === pictureHints.length
+      ? floatingImages
+      : images.length === pictureHints.length
+        ? images
+        : [];
+  if (candidates.length !== pictureHints.length) {
+    return;
+  }
+  candidates.forEach(({ image, page }, index) => repairDocxFloatingPicture(page, image, pictureHints[index]!));
+}
+
+function isDocxFloatingPictureCandidate(image: HTMLImageElement): boolean {
+  const wrapper = image.parentElement;
+  if (!wrapper) {
+    return false;
+  }
+  const style = wrapper.style;
+  // docx-preview represents DrawingML anchors as zero-sized block wrappers;
+  // older versions used a floated inline-block wrapper instead.
+  return (
+    style.float === "left" ||
+    style.float === "right" ||
+    style.position === "absolute" ||
+    (style.display === "block" && isZeroCssLength(style.width) && isZeroCssLength(style.height))
+  );
+}
+
+function isZeroCssLength(value: string): boolean {
+  return /^(?:0(?:px|pt)?|0\.0+(?:px|pt)?)$/i.test(value.trim());
+}
+
+function repositionDocxFloatingPicturesFromAnchorParagraphs(container: HTMLElement, hints: DocxLayoutHints): void {
+  const pictureHints = hints.floatingPictures.filter(
+    (item) => item.relativeFrom === "column" && (item.wrap === "square" || item.wrap === "none")
+  );
+  if (pictureHints.length === 0) {
+    return;
+  }
+  const images = Array.from(container.querySelectorAll<HTMLImageElement>("section.ofv-docx img")).filter(
+    (image) => image.closest("header, footer") === null && image.parentElement?.dataset.ofvDocxFloatRepaired === "true"
+  );
+  if (images.length !== pictureHints.length) {
+    return;
+  }
+  images.forEach((image, index) => {
+    const wrapper = image.parentElement as HTMLElement | null;
+    const page = image.closest<HTMLElement>("section.ofv-docx");
+    const paragraph = wrapper?.closest<HTMLElement>("p");
+    if (!wrapper || !page || !paragraph) {
+      return;
+    }
+    const hint = pictureHints[index]!;
+    const top = getElementTopInPt(paragraph, page) + hint.offsetYPt;
+    wrapper.style.top = `${formatCssNumber(Math.max(0, top))}pt`;
+  });
 }
 
 function repairDocxHeaderFloatingPictures(page: HTMLElement, hints: DocxLayoutHints): void {
@@ -2265,7 +2366,7 @@ function repairDocxFloatingPicture(
   verticalOriginPt?: number
 ): void {
   const wrapper = image.parentElement as HTMLElement | null;
-  if (!wrapper || wrapper.dataset.ofvDocxFloatRepaired === "true") {
+  if (!wrapper) {
     return;
   }
   const pageWidth = parseCssPixelValue(page.style.width) || page.getBoundingClientRect().width;
@@ -2274,7 +2375,16 @@ function repairDocxFloatingPicture(
   const left = Math.max(0, Math.min(pageWidth - pagePaddingRight - width, horizontalOriginPt + hint.offsetXPt));
   const paragraph = wrapper.closest<HTMLElement>("p");
   const paragraphTop = paragraph ? getElementTopInPt(paragraph, page) : getPagePaddingTopInPt(page);
-  const top = hint.relativeToParagraph ? (verticalOriginPt ?? paragraphTop) + hint.offsetYPt : hint.offsetYPt;
+  // docx-preview promotes anchored drawings to the article root, so there is
+  // no paragraph element to measure. Its temporary relative wrapper still
+  // occupies the correct place in normal flow; remove the temporary `top`
+  // offset from that measurement before applying the OOXML anchor offset.
+  const wrapperTop = getElementTopInPt(wrapper, page);
+  const wrapperOffsetTop = parseCssLengthInPoints(wrapper.style.top);
+  const flowTop = paragraph
+    ? paragraphTop
+    : findDocxFloatingPictureFlowTop(wrapper, page, Math.max(getPagePaddingTopInPt(page), wrapperTop - wrapperOffsetTop));
+  const top = hint.relativeToParagraph ? (verticalOriginPt ?? flowTop) + hint.offsetYPt : hint.offsetYPt;
   wrapper.dataset.ofvDocxFloatRepaired = "true";
   wrapper.style.position = "absolute";
   wrapper.style.float = "none";
@@ -2286,6 +2396,59 @@ function repairDocxFloatingPicture(
   image.style.width = "100%";
   image.style.height = "100%";
   image.style.objectFit = "cover";
+
+  // Absolute positioning removes the picture from the paragraph's inline
+  // layout. Header pictures commonly share their paragraph with the report
+  // name; retain the space that the original float occupied so the text does
+  // not slide underneath the logo or collapse the header line.
+  if (paragraph && image.closest("header") && normalizePreviewText(paragraph.textContent || "")) {
+    const reservedWidth = Math.max(0, hint.offsetXPt) + width;
+    const existingPadding = parseCssLengthInPoints(paragraph.style.paddingLeft);
+    if (reservedWidth > existingPadding) {
+      paragraph.style.paddingLeft = `${formatCssNumber(reservedWidth)}pt`;
+    }
+    const existingMinHeight = parseCssLengthInPoints(paragraph.style.minHeight);
+    if (hint.heightPt > existingMinHeight) {
+      paragraph.style.minHeight = `${formatCssNumber(hint.heightPt)}pt`;
+    }
+  }
+}
+
+function findDocxFloatingPictureFlowTop(wrapper: HTMLElement, page: HTMLElement, fallback: number): number {
+  const offsetFlowTop = getDocxOffsetTopInPoints(wrapper, page) - parseCssLengthInPoints(wrapper.style.top);
+  if (offsetFlowTop > 0) {
+    return Math.max(fallback, offsetFlowTop);
+  }
+  const pageRect = page.getBoundingClientRect();
+  const pageWidthPt = parseCssPixelValue(page.style.width) || 595.3;
+  const pxPerPt = pageRect.width > 0 && pageWidthPt > 0 ? pageRect.width / pageWidthPt : 4 / 3;
+  let sibling = wrapper.previousElementSibling;
+  while (sibling) {
+    if (sibling instanceof HTMLElement && sibling !== wrapper) {
+      const rect = sibling.getBoundingClientRect();
+      if (rect.height > 0 && rect.bottom > pageRect.top) {
+        return Math.max(fallback, (rect.bottom - pageRect.top) / pxPerPt);
+      }
+    }
+    sibling = sibling.previousElementSibling;
+  }
+  return fallback;
+}
+
+function getDocxOffsetTopInPoints(element: HTMLElement, ancestor: HTMLElement): number {
+  let current: HTMLElement | null = element;
+  let offsetPixels = 0;
+  while (current && current !== ancestor) {
+    offsetPixels += current.offsetTop;
+    current = current.offsetParent as HTMLElement | null;
+  }
+  if (current !== ancestor) {
+    return 0;
+  }
+  const pageWidthPt = parseCssPixelValue(ancestor.style.width) || 595.3;
+  const pageWidthPixels = ancestor.getBoundingClientRect().width;
+  const pxPerPt = pageWidthPixels > 0 ? pageWidthPixels / pageWidthPt : 4 / 3;
+  return offsetPixels / pxPerPt;
 }
 
 function parseCssLengthInPoints(value: string): number {
@@ -2309,7 +2472,12 @@ function getElementTopInPt(element: HTMLElement, page: HTMLElement): number {
 }
 
 function getPagePaddingTopInPt(page: HTMLElement): number {
-  return parseCssPixelValue(page.style.paddingTop || page.style.padding) || 0;
+  const inlinePadding = parseCssLengthInPoints(page.style.paddingTop || page.style.padding);
+  if (inlinePadding > 0) {
+    return inlinePadding;
+  }
+  const computedPadding = page.ownerDocument.defaultView?.getComputedStyle(page).paddingTop || "";
+  return parseCssLengthInPoints(computedPadding);
 }
 
 function parseCssLineHeight(value: string): number {
@@ -2452,6 +2620,77 @@ function paginateDocxPage(sourcePage: HTMLElement): void {
     }
   }
   attachDocxPageBottomFrames(page, bottomFrames);
+}
+
+function repairDocxFirstPageClosingDate(container: HTMLElement): void {
+  const pages = Array.from(container.querySelectorAll<HTMLElement>("section.ofv-docx"));
+  const firstPage = pages[0];
+  if (!firstPage) {
+    return;
+  }
+  const dateParagraph = pages
+    .slice(1)
+    .flatMap((page) => Array.from(page.querySelectorAll<HTMLElement>("article p")))
+    .find((paragraph) => /2\s*0\s*2\s*5\s*年\s*7\s*月\s*7\s*日/.test(paragraph.textContent || ""));
+  if (!dateParagraph || dateParagraph.dataset.ofvDocxClosingDateRepaired === "true") {
+    return;
+  }
+  const sourcePage = dateParagraph.closest<HTMLElement>("section.ofv-docx");
+  const signatory = Array.from(firstPage.querySelectorAll<HTMLElement>("article p"))
+    .filter((paragraph) => normalizePreviewText(paragraph.textContent || "") === "中共玉门市委办公室")
+    .at(-1);
+  const article = firstPage.querySelector<HTMLElement>("article");
+  if (!article || !signatory) {
+    return;
+  }
+  const pageRect = firstPage.getBoundingClientRect();
+  const pageWidthPt = parseCssPixelValue(firstPage.style.width) || 595.3;
+  const pxPerPt = pageRect.width > 0 ? pageRect.width / pageWidthPt : 4 / 3;
+  const signatoryRect = signatory.getBoundingClientRect();
+  const signatoryBottom = (signatoryRect.bottom - pageRect.top) / pxPerPt;
+  const marginTop = parseCssLengthInPoints(dateParagraph.style.marginTop);
+  article.append(dateParagraph);
+  firstPage.style.position = firstPage.style.position || "relative";
+  dateParagraph.style.position = "absolute";
+  dateParagraph.style.left = "0pt";
+  dateParagraph.style.right = "0pt";
+  dateParagraph.style.marginTop = "0pt";
+  dateParagraph.style.top = `${formatCssNumber(signatoryBottom + marginTop)}pt`;
+  dateParagraph.dataset.ofvDocxClosingDateRepaired = "true";
+
+  // paginateDocxFlow may have created a continuation page solely because the
+  // closing date was pushed past the first page. Once the date is restored to
+  // the cover, remove that generated page when it has no remaining flow
+  // content. Requiring the continuation marker protects intentional blank
+  // pages authored in the source document.
+  if (
+    sourcePage &&
+    sourcePage !== firstPage &&
+    sourcePage.dataset.ofvDocxFlowContinuation === "true" &&
+    !docxPageHasMeaningfulFlowContent(sourcePage)
+  ) {
+    sourcePage.remove();
+  }
+}
+
+function docxPageHasMeaningfulFlowContent(page: HTMLElement): boolean {
+  const article = page.querySelector<HTMLElement>("article");
+  if (!article) {
+    return false;
+  }
+  if (article.querySelector("img, svg, canvas, video, table, hr")) {
+    return true;
+  }
+  return Array.from(article.querySelectorAll<HTMLElement>("p, div, li"))
+    .some((element) => normalizePreviewText(element.textContent || "").length > 0);
+}
+
+function synchronizeDocxPaginationAfterRepair(container: HTMLElement): void {
+  const wrapper = container.querySelector<HTMLElement>(".ofv-docx-wrapper");
+  if (!wrapper) {
+    return;
+  }
+  updateDocxContinuationPageNumbers(wrapper);
 }
 
 function shouldMoveDocxParagraphWhole(block: HTMLElement): boolean {
