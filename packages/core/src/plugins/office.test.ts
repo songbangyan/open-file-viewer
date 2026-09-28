@@ -1322,6 +1322,44 @@ describe("officePlugin", () => {
     });
   });
 
+  it("sanitizes DOCX preview links and sandboxes altChunk frames without removing SVG", async () => {
+    renderDocxAsync.mockImplementationOnce(async (_data: unknown, bodyContainer: HTMLElement) => {
+      bodyContainer.innerHTML = `<div class="ofv-docx-wrapper"><section class="ofv-docx">
+        <p><a href="javascript:window.__OFV_PROBE_JS=1">LINK-JAVASCRIPT</a></p>
+        <p><a href="data:text/html;base64,PHNjcmlwdD4xPC9zY3JpcHQ+">LINK-DATA</a></p>
+        <p><a href="https://example.com/control" onclick="window.__OFV_PROBE_CLICK=1">LINK-HTTPS-CONTROL</a></p>
+        <p><a href="mailto:help@example.com">LINK-MAILTO</a></p>
+        <iframe srcdoc="&lt;p&gt;ALTCHUNK-CONTENT&lt;/p&gt;&lt;script&gt;window.top.__OFV_ALTCHUNK_SCRIPT=1&lt;/script&gt;"></iframe>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>
+      </section></div>`;
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    createViewer({
+      container,
+      file: new Blob(["docx"], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }),
+      fileName: "hyperlink-scheme.docx",
+      plugins: [officePlugin()]
+    });
+
+    await waitFor(() => Boolean(container.querySelector(".ofv-docx-document")));
+    const links = Array.from(container.querySelectorAll<HTMLAnchorElement>(".ofv-docx-document a"));
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      null,
+      null,
+      "https://example.com/control",
+      "mailto:help@example.com"
+    ]);
+    expect(container.querySelector(".ofv-docx-document iframe")?.getAttribute("sandbox")).toBe("");
+    const srcdoc = container.querySelector(".ofv-docx-document iframe")?.getAttribute("srcdoc");
+    expect(srcdoc).toContain("ALTCHUNK-CONTENT");
+    expect(srcdoc).not.toContain("__OFV_ALTCHUNK_SCRIPT");
+    expect(links[2]?.hasAttribute("onclick")).toBe(false);
+    expect(container.querySelector(".ofv-docx-document svg path")?.getAttribute("d")).toBe("M0 0h10v10H0z");
+  });
+
   it("restores Word default page margins when a generated DOCX omits pgMar", async () => {
     const container = document.createElement("div");
     document.body.append(container);

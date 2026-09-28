@@ -631,6 +631,7 @@ async function renderDocx(
     // complete set of rendered images (including late-loaded seals).
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     await normalizeDocxLayout(content, arrayBuffer, styleContainer);
+    sanitizeDocxPreview(content);
     const shouldUseTextboxFallback =
       (await docxPreviewLooksBlank(content, arrayBuffer)) ||
       (await docxPreviewMissesRichTextboxContent(content, arrayBuffer)) ||
@@ -665,6 +666,32 @@ async function renderDocx(
     console.warn("DOCX layout preview failed, fell back to Mammoth:", error);
   }
   return () => undefined;
+}
+
+function sanitizeDocxPreview(content: HTMLElement): void {
+  // docx-preview creates elements from OOXML relationships and altChunk HTML.
+  // Keep SVG drawings and isolated altChunk content while sanitizing the DOM
+  // before it is attached to the viewer.
+  const altChunks = new Map<HTMLIFrameElement, string>();
+  for (const frame of content.querySelectorAll("iframe")) {
+    if (frame.hasAttribute("srcdoc")) {
+      altChunks.set(frame, frame.srcdoc);
+    }
+    frame.setAttribute("sandbox", "");
+  }
+  DOMPurify.sanitize(content, {
+    IN_PLACE: true,
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+    ADD_TAGS: ["iframe", "foreignObject"],
+    ADD_ATTR: ["target", "sandbox"]
+  });
+  for (const [frame, srcdoc] of altChunks) {
+    if (content.contains(frame) && frame.getAttribute("sandbox") === "") {
+      frame.srcdoc = DOMPurify.sanitize(srcdoc, {
+        USE_PROFILES: { html: true, svg: true, svgFilters: true }
+      });
+    }
+  }
 }
 
 function docxRenderTimeoutMs(): number {
