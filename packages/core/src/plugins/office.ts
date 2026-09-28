@@ -8868,10 +8868,11 @@ async function prepareLegacyPowerPointImages(
     }
     try {
       const buffer = toStandaloneArrayBuffer(image.bytes);
-      const dataUrl =
-        image.kind === "emf"
-          ? await converter.convertEmfToDataUrl(buffer, { maxWidth: 1600, maxHeight: 1200, dpiScale: 1.5 })
-          : await converter.convertWmfToDataUrl(buffer, { maxWidth: 1600, maxHeight: 1200, dpiScale: 1.5 });
+      const dataUrl = await converter.convertMetafileToDataUrl(buffer, {
+        maxWidth: 1600,
+        maxHeight: 1200,
+        dpiScale: 1.5
+      });
       if (dataUrl) {
         sources.set(image.index, { src: dataUrl, revoke: false });
       }
