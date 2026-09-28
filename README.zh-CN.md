@@ -110,6 +110,19 @@ export default defineConfig({
 `manualChunks` 不是必需配置。如果项目已有统一的 vendor 分包函数，请让 `/prismjs/components/`
 返回 `undefined`，避免把所有带副作用的语言组件折叠到同一个 chunk。
 
+使用 `officePlugin()` 时，`emf-converter` 的可选 Node canvas 回退代码可能被 Vite 的依赖预构建或
+Rollup 提前解析，导致浏览器构建尝试加载原生 `.node` 文件。将下面两项合并进现有 Vite 配置；浏览器
+中的 EMF/WMF 转换仍使用 Canvas，不会执行 Node 回退代码：
+
+```ts
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  optimizeDeps: { exclude: ["emf-converter"] },
+  build: { rollupOptions: { external: ["@napi-rs/canvas"] } }
+});
+```
+
 也可以使用 npm 或 yarn：
 
 ```bash

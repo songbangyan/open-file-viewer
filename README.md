@@ -80,6 +80,20 @@ PDF preview requires `pdfjs-dist` when you use `pdfPlugin()`:
 pnpm add pdfjs-dist
 ```
 
+When using `officePlugin()` with Vite, exclude the converter from dependency pre-bundling and
+externalize its optional Node canvas fallback from the browser build. EMF/WMF conversion in the
+browser still uses Canvas:
+
+```ts
+// vite.config.ts — merge these options into your existing config
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  optimizeDeps: { exclude: ["emf-converter"] },
+  build: { rollupOptions: { external: ["@napi-rs/canvas"] } }
+});
+```
+
 You can also use npm or yarn:
 
 ```bash
