@@ -1874,7 +1874,7 @@ function paginateCjkNoticeBlocks(blocks: LegacyWordBlock[]): LegacyWordBlock[][]
         continue;
       }
 
-      const rowUnits = block.rows[0]?.length === 7 ? 1.65 : 1.35;
+      const rowUnits = block.rows[0]?.length === 7 ? 1.55 : 1.35;
       let offset = 0;
       while (offset < block.rows.length) {
         let availableRows = Math.floor((maxUnits - usedUnits + 0.001) / rowUnits);

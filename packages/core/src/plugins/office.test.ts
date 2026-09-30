@@ -3874,7 +3874,7 @@ describe("officePlugin", () => {
     expect(rows[7].cells[0].textContent).toContain("请查阅相关资料");
   });
 
-  it("moves duplicate Word binary page breaks to trailing blank pages in Chinese notice documents", () => {
+  it("moves duplicate page breaks to trailing blank pages and keeps compact seven-column notice tables together", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const table3: LegacyWordDocument["blocks"][number] = {
@@ -3947,15 +3947,14 @@ describe("officePlugin", () => {
 
     const pages = Array.from(container.querySelectorAll<HTMLElement>(".ofv-msdoc-page"));
     expect(container.querySelector(".ofv-msdoc-notice-document")).not.toBeNull();
-    expect(pages).toHaveLength(7);
+    expect(pages).toHaveLength(6);
     expect(pages[0].querySelector(".ofv-msdoc-title")?.textContent).toBe("关于移动端应用问题");
     expect(pages[0].querySelector(".ofv-msdoc-subtitle")?.textContent).toBe("整改的通知");
     expect(pages[1].textContent).toContain("3.接口改造应用清单");
     expect(pages[2].querySelectorAll(".ofv-msdoc-notice-table tr")).toHaveLength(20);
     expect(pages[3].querySelectorAll(".ofv-msdoc-notice-table tr")).toHaveLength(2);
-    expect(pages[4].querySelectorAll(".ofv-msdoc-notice-table tr")).toHaveLength(16);
-    expect(pages[5].querySelectorAll(".ofv-msdoc-notice-table tr")).toHaveLength(1);
-    expect(pages[6].textContent?.trim()).toBe("");
+    expect(pages[4].querySelectorAll(".ofv-msdoc-notice-table tr")).toHaveLength(17);
+    expect(pages[5].textContent?.trim()).toBe("");
     expect(pages[3].querySelector(".ofv-msdoc-notice-table th")).toBeNull();
     expect(Array.from(pages[2].querySelectorAll<HTMLTableColElement>("col")).map((column) => column.style.width)).toEqual([
       "6%",
